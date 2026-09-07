@@ -175,4 +175,4 @@ curl -s "https://api.themoviedb.org/3/search/movie?api_key=YOUR_KEY&query=Happy%
 
 ## License
 
-0BSD (or choose your own when publishing).
+MIT License.
