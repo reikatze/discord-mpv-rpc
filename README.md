@@ -10,10 +10,12 @@ Search results and poster URLs are **cached on disk** so the same title is not l
 ## Features
 
 - Status line **Watching &lt;official or cleaned title&gt;** (`status_display_type` = details)
-- Title from TMDb when available, otherwise the parsed filename, then mpv’s media-title
+- Title from TMDb when available, then file `metadata/title`, then parsed filename, then mpv’s media-title
 - Play/pause, elapsed and remaining time
+- Chapter name and TMDb episode name on the state line when available
 - Discord progress bar while playing (timestamps removed while paused so the bar freezes)
 - Optional **TMDb** `/search/multi` poster lookup via async `curl` (does not block playback)
+- TV episode still when the filename includes `SxxExx`
 - Clickable title/poster links to the TMDb page
 - **Disk cache** of search hits (poster, official title, TMDb URL)
 - Filename parsing for common movie and TV/anime release names
@@ -121,7 +123,7 @@ Search results and poster URLs are cached next to the script as `discord-mpv-rpc
 | Standard (Linux/macOS) | `~/.config/mpv/scripts/discord-mpv-rpc/main.lua` | `~/.config/mpv/scripts/discord-mpv-rpc/discord-mpv-rpc-posters.json` |
 | Portable | `<mpv_dir>\portable_config\scripts\discord-mpv-rpc\main.lua` | `<mpv_dir>\portable_config\scripts\discord-mpv-rpc\discord-mpv-rpc-posters.json` |
 
-- Cache key: `multi:title|year`
+- Cache key: `multi:title|year` or `multi:title|year|SxxExx` for episodes
 - Each hit stores poster URL, official TMDb title, and TMDb page URL
 - Confirmed misses are stored as `false`
 - Transient network errors are **not** cached (will retry next time)
@@ -140,7 +142,8 @@ Delete the cache file to force fresh TMDb lookups.
 - If a wsrv.nl letterbox URL fails, that poster falls back to the raw TMDb image.
 - `idle-active` stops the timer when nothing is playing.
 - TMDb uses `/search/multi` (movie + TV in one request). Filename TV/movie detection is only a ranking hint.
-- The Watching line prefers the official TMDb title, then the cleaned filename, then `media-title`.
+- The Watching line prefers the official TMDb title, then the file’s `metadata/title` tag, then the cleaned filename, then `media-title`.
+- For TV files with a season/episode, a second TMDb call loads the episode still and name when available.
 - `details_url` / `state_url` / `assets.large_url` point at the TMDb page when a hit exists.
 - TMDb searches run in a Lua coroutine with `mp.command_native_async`. Playback continues while `curl` runs. A generation counter drops stale results if you open another file before the request finishes. Cache hits skip the network entirely.
 
