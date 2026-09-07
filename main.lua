@@ -828,10 +828,12 @@ local last = {
 }
 local timer = nil
 local activity = {
-    type    = ACTIVITY_WATCHING,
-    details = '',
-    state   = '',
-    assets  = {
+    type                = ACTIVITY_WATCHING,
+    name                = '',
+    status_display_type = 2,
+    details             = '',
+    state               = '',
+    assets              = {
         large_image = FALLBACK_IMG,
         large_text  = FALLBACK_TXT,
     },
@@ -889,9 +891,13 @@ tick = function(force)
         return
     end
 
-    activity.type    = ACTIVITY_WATCHING
-    activity.details = title
-    activity.state   = state
+    -- type 3 = Watching. status_display_type 2 = use details after
+    -- "Watching", so friends see "Watching The Title" not the app name.
+    activity.type                = ACTIVITY_WATCHING
+    activity.name                = title
+    activity.status_display_type = 2
+    activity.details             = title
+    activity.state               = state
     activity.assets.large_image = presence_image(current_poster)
     activity.assets.large_text  = current_poster and title or FALLBACK_TXT
 
