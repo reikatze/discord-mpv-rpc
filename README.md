@@ -3,12 +3,13 @@ mpv Discord Rich Presence + TMDb posters.
 
 Discord Rich Presence for [mpv](https://mpv.io/) with optional movie/TV posters from [TMDb](https://www.themoviedb.org/).
 
-Displays the current file title, play/pause state, and a progress bar. When a TMDb API key is set, looks up a poster from the filename and uses it as the large image (falls back to a static Discord asset otherwise).
+Displays the current file title, play/pause state, and a progress bar. Friends see **Watching &lt;media title&gt;** (for example Watching Sousou no Frieren), not the Developer Portal application name. When a TMDb API key is set, looks up a poster from the filename and uses it as the large image (falls back to a static Discord asset otherwise).
 
 Search results and poster URLs are **cached on disk** so the same title is not looked up again across sessions.
 
 ## Features
 
+- Status line **Watching &lt;media title&gt;** (`status_display_type` = details, not the app name)
 - Current media title, play/pause, elapsed and remaining time
 - Discord progress bar while playing (timestamps removed while paused so the bar freezes)
 - Optional **TMDb** poster lookup via async `curl` (does not block playback)
@@ -60,7 +61,7 @@ If you use mpv portable mode (`portable_config` next to `mpv.exe`):
 
 mpv auto-loads `scripts/discord-mpv-rpc/main.lua`.
 
-3. Create **your own** application at the [Discord Developer Portal](https://discord.com/developers/applications) (**New Application**). Friends will see this app’s name as “Watching &lt;name&gt;”.
+3. Create **your own** application at the [Discord Developer Portal](https://discord.com/developers/applications) (**New Application**). The app name is only a fallback on older Discord clients. Current clients show **Watching &lt;media title&gt;**.
 
    Do **not** use an Application ID from this repo, a friend, or a screenshot. Each user should have their own app. You do not need a bot, install link, or OAuth for Rich Presence.
 
@@ -136,6 +137,16 @@ Delete the cache file to force fresh TMDb lookups.
 - If a wsrv.nl letterbox URL fails, that poster falls back to the raw TMDb image.
 - `idle-active` stops the timer when nothing is playing.
 - TMDb searches run in a Lua coroutine with `mp.command_native_async`. Playback continues while `curl` runs. A generation counter drops stale results if you open another file before the request finishes. Cache hits skip the network entirely.
+
+## Supported filename patterns
+
+| Example | Parsed as |
+|---------|-----------|
+| `Happy.Gilmore.2.2025.1080p.WEBRip....mkv` | Movie **Happy Gilmore 2** (2025) |
+| `The.Boy.and.the.Heron.2023.1080p.AMZN....mkv` | Movie **The Boy And The Heron** (2023) |
+| `Shin Godzilla (2016).1080p.H264....mkv` | Movie **Shin Godzilla** (2016) |
+| `[Judas] Dragon Ball Daima - S01E01v2.mkv` | TV **Dragon Ball Daima** |
+| `[SubsPlease] Sousou no Frieren S2 - 01 (1080p) [HASH].mkv` | TV **Sousou No Frieren** |
 
 ## Usage
 
