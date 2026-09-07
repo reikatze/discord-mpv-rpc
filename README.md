@@ -9,11 +9,13 @@ Search results and poster URLs are **cached on disk** so the same title is not l
 
 ## Features
 
-- Status line **Watching &lt;media title&gt;** (`status_display_type` = details, not the app name)
-- Current media title, play/pause, elapsed and remaining time
+- Status line **Watching &lt;official or cleaned title&gt;** (`status_display_type` = details)
+- Title from TMDb when available, otherwise the parsed filename, then mpv’s media-title
+- Play/pause, elapsed and remaining time
 - Discord progress bar while playing (timestamps removed while paused so the bar freezes)
-- Optional **TMDb** poster lookup via async `curl` (does not block playback)
-- **Disk cache** of search results and poster URLs, written after each lookup
+- Optional **TMDb** `/search/multi` poster lookup via async `curl` (does not block playback)
+- Clickable title/poster links to the TMDb page
+- **Disk cache** of search hits (poster, official title, TMDb URL)
 - Filename parsing for common movie and TV/anime release names
 - Toggle on/off with a key binding (default **D**)
 - Supports both standard config (`%APPDATA%\mpv` / `~/.config/mpv`) and **portable_config**
@@ -119,8 +121,9 @@ Search results and poster URLs are cached next to the script as `discord-mpv-rpc
 | Standard (Linux/macOS) | `~/.config/mpv/scripts/discord-mpv-rpc/main.lua` | `~/.config/mpv/scripts/discord-mpv-rpc/discord-mpv-rpc-posters.json` |
 | Portable | `<mpv_dir>\portable_config\scripts\discord-mpv-rpc\main.lua` | `<mpv_dir>\portable_config\scripts\discord-mpv-rpc\discord-mpv-rpc-posters.json` |
 
-- Cache key: `movie:title|year` or `tv:title|year`
-- Successful poster URLs and confirmed misses are stored
+- Cache key: `multi:title|year`
+- Each hit stores poster URL, official TMDb title, and TMDb page URL
+- Confirmed misses are stored as `false`
 - Transient network errors are **not** cached (will retry next time)
 - Cache is written to disk **after each TMDb result**, and again on shutdown
 
@@ -136,6 +139,9 @@ Delete the cache file to force fresh TMDb lookups.
 - TMDb HTTP 429 triggers an exponential backoff (30s–5min) and is not stored as a cache miss.
 - If a wsrv.nl letterbox URL fails, that poster falls back to the raw TMDb image.
 - `idle-active` stops the timer when nothing is playing.
+- TMDb uses `/search/multi` (movie + TV in one request). Filename TV/movie detection is only a ranking hint.
+- The Watching line prefers the official TMDb title, then the cleaned filename, then `media-title`.
+- `details_url` / `state_url` / `assets.large_url` point at the TMDb page when a hit exists.
 - TMDb searches run in a Lua coroutine with `mp.command_native_async`. Playback continues while `curl` runs. A generation counter drops stale results if you open another file before the request finishes. Cache hits skip the network entirely.
 
 ## Usage
@@ -166,4 +172,4 @@ curl -s "https://api.themoviedb.org/3/search/movie?api_key=YOUR_KEY&query=Happy%
 
 ## License
 
-MIT license.
+0BSD (or choose your own when publishing).
