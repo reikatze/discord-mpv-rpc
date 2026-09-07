@@ -138,16 +138,6 @@ Delete the cache file to force fresh TMDb lookups.
 - `idle-active` stops the timer when nothing is playing.
 - TMDb searches run in a Lua coroutine with `mp.command_native_async`. Playback continues while `curl` runs. A generation counter drops stale results if you open another file before the request finishes. Cache hits skip the network entirely.
 
-## Supported filename patterns
-
-| Example | Parsed as |
-|---------|-----------|
-| `Happy.Gilmore.2.2025.1080p.WEBRip....mkv` | Movie **Happy Gilmore 2** (2025) |
-| `The.Boy.and.the.Heron.2023.1080p.AMZN....mkv` | Movie **The Boy And The Heron** (2023) |
-| `Shin Godzilla (2016).1080p.H264....mkv` | Movie **Shin Godzilla** (2016) |
-| `[Judas] Dragon Ball Daima - S01E01v2.mkv` | TV **Dragon Ball Daima** |
-| `[SubsPlease] Sousou no Frieren S2 - 01 (1080p) [HASH].mkv` | TV **Sousou No Frieren** |
-
 ## Usage
 
 - Start mpv with Discord open. Presence should appear after a short delay.
