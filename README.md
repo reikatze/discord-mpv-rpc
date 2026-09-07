@@ -3,24 +3,24 @@ mpv Discord Rich Presence + TMDb posters.
 
 Discord Rich Presence for [mpv](https://mpv.io/) with optional movie/TV posters from [TMDb](https://www.themoviedb.org/).
 
-Displays the current file title, play/pause state, and a progress bar. Friends see **Watching &lt;media title&gt;** (for example Watching Sousou no Frieren), not the Developer Portal application name. When a TMDb API key is set, looks up a poster from the filename and uses it as the large image (falls back to a static Discord asset otherwise).
+Displays the current file title, play/pause state, and a progress bar. Friends see Watching &lt;media title&gt; (for example Watching Sousou no Frieren), not the Developer Portal application name. When a TMDb API key is set, looks up a poster from the filename and uses it as the large image (falls back to a static Discord asset otherwise).
 
-Search results and poster URLs are **cached on disk** so the same title is not looked up again across sessions.
+Search results and poster URLs are cached on disk so the same title is not looked up again across sessions.
 
 ## Features
 
-- Status line **Watching &lt;official or cleaned title&gt;** (`status_display_type` = details)
+- Status line Watching &lt;official or cleaned title&gt; (`status_display_type` = details)
 - Title from TMDb when available, then file `metadata/title`, then parsed filename, then mpv’s media-title
 - Play/pause, elapsed and remaining time
 - Chapter name and TMDb episode name on the state line when available
 - Discord progress bar while playing (timestamps removed while paused so the bar freezes)
-- Optional **TMDb** `/search/multi` poster lookup via async `curl` (does not block playback)
+- Optional TMDb `/search/multi` poster lookup via async `curl` (does not block playback)
 - TV episode still when the filename includes `SxxExx`
 - Clickable title/poster links to the TMDb page
-- **Disk cache** of search hits (poster, official title, TMDb URL)
+- Disk cache of search hits (poster, official title, TMDb URL)
 - Filename parsing for common movie and TV/anime release names
-- Toggle on/off with a key binding (default **D**)
-- Supports both standard config (`%APPDATA%\mpv` / `~/.config/mpv`) and **portable_config**
+- Toggle on/off with a key binding (default D)
+- Supports both standard config (`%APPDATA%\mpv` / `~/.config/mpv`) and portable_config
 - No Lua library dependencies (uses system `curl` only for posters)
 
 ## Requirements
@@ -28,12 +28,12 @@ Search results and poster URLs are **cached on disk** so the same title is not l
 - [mpv](https://mpv.io/) (LuaJIT recommended)
 - Discord desktop app running
 - [`curl`](https://curl.se/) on your `PATH` (only needed for TMDb posters)
-- **Your own** Discord application ID (do not reuse someone else’s)
+- Your own Discord application ID (do not reuse someone else’s)
 - (Optional) A free [TMDb API key](https://www.themoviedb.org/settings/api)
 
 ## Installation
 
-Install the script in a **subdirectory** of `scripts/` so the poster cache can live next to it.
+Install the script in a subdirectory of `scripts/` so the poster cache can live next to it.
 
 ### Standard config (`%APPDATA%` / XDG)
 
@@ -44,7 +44,7 @@ Install the script in a **subdirectory** of `scripts/` so the poster cache can l
    | Windows | `%APPDATA%\mpv\scripts\discord-mpv-rpc\main.lua` |
    | Linux / macOS | `~/.config/mpv/scripts/discord-mpv-rpc/main.lua` |
 
-2. Copy `discord-mpv-rpc.conf` into your **script-opts** folder and edit it:
+2. Copy `discord-mpv-rpc.conf` into your script-opts folder and edit it:
 
    | OS | Path |
    |----|------|
@@ -65,17 +65,17 @@ If you use mpv portable mode (`portable_config` next to `mpv.exe`):
 
 mpv auto-loads `scripts/discord-mpv-rpc/main.lua`.
 
-3. Create **your own** application at the [Discord Developer Portal](https://discord.com/developers/applications) (**New Application**). The app name is only a fallback on older Discord clients. Current clients show **Watching &lt;media title&gt;**.
+3. Create your own application at the [Discord Developer Portal](https://discord.com/developers/applications) (New Application). The app name is only a fallback on older Discord clients. Current clients show Watching &lt;media title&gt;.
 
-   Do **not** use an Application ID from this repo, a friend, or a screenshot. Each user should have their own app. You do not need a bot, install link, or OAuth for Rich Presence.
+   Do not use an Application ID from this repo, a friend, or a screenshot. Each user should have their own app. You do not need a bot, install link, or OAuth for Rich Presence.
 
-4. Open the app → **General Information** → copy **Application ID** into `client_id=` in `discord-mpv-rpc.conf`.
+4. Open the app → General Information → copy Application ID into `client_id=` in `discord-mpv-rpc.conf`.
 
-5. (Optional) **Rich Presence → Art Assets**: upload square images named `mpv`, `play`, and `pause` (or match `large_image` / `small_image_*`). Assets belong to *your* app; they are not shared across IDs.
+5. (Optional) Rich Presence → Art Assets: upload square images named `mpv`, `play`, and `pause` (or match `large_image` / `small_image_*`). Assets belong to *your* app; they are not shared across IDs.
 
 6. (Optional) Get a TMDb API key and set `tmdb_api_key=` for poster images.
 
-7. In Discord: **Settings → Activity Privacy → Display current activity as a status message** — enabled.
+7. In Discord: Settings → Activity Privacy → Display current activity as a status message — enabled.
 
 ## Configuration
 
@@ -126,17 +126,17 @@ Search results and poster URLs are cached next to the script as `discord-mpv-rpc
 - Cache key: `multi:title|year` or `multi:title|year|SxxExx` for episodes
 - Each hit stores poster URL, official TMDb title, and TMDb page URL
 - Confirmed misses are stored as `false`
-- Transient network errors are **not** cached (will retry next time)
-- Cache is written to disk **after each TMDb result**, and again on shutdown
+- Transient network errors are not cached (will retry next time)
+- Cache is written to disk after each TMDb result, and again on shutdown
 
 Delete the cache file to force fresh TMDb lookups.
 
 ## How updates work
 
-- Presence text (elapsed / remaining) refreshes on a timer **only while playing** (default every 15s, to stay under Discord’s informal presence cap).
+- Presence text (elapsed / remaining) refreshes on a timer only while playing (default every 15s, to stay under Discord’s informal presence cap).
 - Pause, unpause, seek, new file, and poster arrival always send immediately (`tick(true)`).
 - While paused, the timer is stopped and Discord timestamps are omitted so the progress bar does not keep moving.
-- `time-pos` is observed **only while paused**, so seeking in pause still updates the text without polling during playback.
+- `time-pos` is observed only while paused, so seeking in pause still updates the text without polling during playback.
 - `playback-restart` (seek / resume while playing) updates immediately, debounced to 0.4s so scrubbing does not spam Discord.
 - TMDb HTTP 429 triggers an exponential backoff (30s–5min) and is not stored as a cache miss.
 - If a wsrv.nl letterbox URL fails, that poster falls back to the raw TMDb image.
@@ -150,7 +150,7 @@ Delete the cache file to force fresh TMDb lookups.
 ## Usage
 
 - Start mpv with Discord open. Presence should appear after a short delay.
-- Press **D** (or your `key_toggle`) to turn Rich Presence on or off.
+- Press D (or your `key_toggle`) to turn Rich Presence on or off.
 - Run mpv from a terminal to see log lines such as:
   - `discord-mpv-rpc: connected to Discord`
   - `discord-mpv-rpc: cleaned title="..." year=... tv=...`
