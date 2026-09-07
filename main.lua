@@ -121,6 +121,9 @@ local poster_cache = {}
 local poster_cache_loaded = false
 local poster_cache_dirty = false
 local current_poster = nil
+local current_clean_title = nil
+local current_tmdb_title = nil
+local current_tmdb_url = nil
 
 local function load_poster_cache()
     if poster_cache_loaded then return end
@@ -378,7 +381,61 @@ end
 local tmdb_backoff_until = 0
 local tmdb_backoff_sec   = 30
 
-local function tmdb_poster(title, year, is_tv)
+local function unpack_cache_entry(cached)
+    if type(cached) == 'string' and #cached > 0 then
+        return { poster = cached }
+    end
+    if type(cached) == 'table' and cached.poster and #cached.poster > 0 then
+        return cached
+    end
+    return nil
+end
+
+local function tmdb_page_url(result)
+    if not result or not result.id then return nil end
+    if result.media_type == 'tv' then
+        return 'https://www.themoviedb.org/tv/' .. tostring(result.id)
+    end
+    if result.media_type == 'movie' then
+        return 'https://www.themoviedb.org/movie/' .. tostring(result.id)
+    end
+    return nil
+end
+
+local function tmdb_official_title(result)
+    if not result then return nil end
+    local official = result.title or result.name
+    if official and #official > 0 then
+        return official
+    end
+    return result.original_title or result.original_name
+end
+
+local function score_multi_result(r, year, prefer_tv)
+    if not r or r.media_type == 'person' then
+        return -1
+    end
+    if r.media_type ~= 'movie' and r.media_type ~= 'tv' then
+        return -1
+    end
+    local score = 0
+    if r.poster_path then score = score + 8 end
+    local date = r.release_date or r.first_air_date or ''
+    local ry = match(date, '^(%d%d%d%d)')
+    if year and ry == year then
+        score = score + 20
+    elseif year and ry then
+        score = score - 5
+    end
+    if prefer_tv and r.media_type == 'tv' then
+        score = score + 4
+    elseif not prefer_tv and r.media_type == 'movie' then
+        score = score + 4
+    end
+    return score
+end
+
+local function tmdb_lookup(title, year, is_tv)
     if TMDB_KEY == '' or not title or title == '' then
         return nil
     end
@@ -390,35 +447,25 @@ local function tmdb_poster(title, year, is_tv)
 
     load_poster_cache()
 
-    local key = (is_tv and 'tv:' or 'movie:') .. title:lower() .. '|' .. (year or '')
+    local key = 'multi:' .. title:lower() .. '|' .. (year or '')
     local cached = poster_cache[key]
-    if type(cached) == 'string' and #cached > 0 then
-        log_verbose('poster cache hit -> ' .. cached)
-        return cached
-    end
     if cached == false then
         log_verbose('poster cache hit (no poster)')
         return nil
     end
-
-    local q = url_encode(title)
-    local url
-    if is_tv then
-        url = format(
-            'https://api.themoviedb.org/3/search/tv?api_key=%s&language=%s&query=%s&page=1%s',
-            TMDB_KEY, TMDB_LANG, q,
-            year and ('&first_air_date_year=' .. year) or ''
-        )
-    else
-        url = format(
-            'https://api.themoviedb.org/3/search/movie?api_key=%s&language=%s&query=%s&page=1&include_adult=false%s',
-            TMDB_KEY, TMDB_LANG, q,
-            year and ('&year=' .. year) or ''
-        )
+    local hit = unpack_cache_entry(cached)
+    if hit then
+        log_verbose('poster cache hit -> ' .. hit.poster)
+        return hit
     end
 
-    log_verbose(format('TMDb %s query="%s" year=%s',
-        is_tv and 'tv' or 'movie', title, tostring(year)))
+    local url = format(
+        'https://api.themoviedb.org/3/search/multi?api_key=%s&language=%s&query=%s&page=1&include_adult=false',
+        TMDB_KEY, TMDB_LANG, url_encode(title)
+    )
+
+    log_verbose(format('TMDb multi query="%s" year=%s tv_hint=%s',
+        title, tostring(year), tostring(is_tv)))
 
     local body, status = curl_get(url)
     if status == 429 then
@@ -438,31 +485,34 @@ local function tmdb_poster(title, year, is_tv)
         return nil
     end
     tmdb_backoff_sec = 30
-    if not data or not data.results or #data.results == 0 then
+    if not data.results or #data.results == 0 then
         remember_poster(key, false)
         log_verbose('TMDb no results')
         return nil
     end
 
-    local best
+    local best, best_score
     for i = 1, #data.results do
-        local r = data.results[i]
-        if r.poster_path then
-            local date = r.release_date or r.first_air_date or ''
-            local ry = match(date, '^(%d%d%d%d)')
-            if year and ry == year then
-                best = r
-                break
-            end
-            if not best then best = r end
+        local s = score_multi_result(data.results[i], year, is_tv)
+        if s >= 0 and (not best_score or s > best_score) then
+            best = data.results[i]
+            best_score = s
         end
     end
 
     if best and best.poster_path then
-        local poster = 'https://image.tmdb.org/t/p/w500' .. best.poster_path
-        remember_poster(key, poster)
-        log_info('poster -> ' .. poster)
-        return poster
+        hit = {
+            poster = 'https://image.tmdb.org/t/p/w500' .. best.poster_path,
+            title  = tmdb_official_title(best),
+            url    = tmdb_page_url(best),
+            type   = best.media_type,
+        }
+        remember_poster(key, hit)
+        log_info('poster -> ' .. hit.poster)
+        if hit.title then
+            log_info('title  -> ' .. hit.title)
+        end
+        return hit
     end
 
     remember_poster(key, false)
@@ -471,12 +521,37 @@ end
 
 local poster_gen = 0
 
-local function lookup_poster()
+local function clear_title_state()
     current_poster = nil
-    if TMDB_KEY == '' then return end
+    current_clean_title = nil
+    current_tmdb_title = nil
+    current_tmdb_url = nil
+end
+
+local function apply_tmdb_hit(hit)
+    if not hit then
+        current_poster = nil
+        current_tmdb_title = nil
+        current_tmdb_url = nil
+        return
+    end
+    current_poster = hit.poster
+    current_tmdb_title = hit.title
+    current_tmdb_url = hit.url
+end
+
+local function lookup_poster()
+    clear_title_state()
 
     local path = get_property('path')
-    if not path then return end
+    if path then
+        local title = clean_filename(path)
+        if title and title ~= '' then
+            current_clean_title = title
+        end
+    end
+
+    if TMDB_KEY == '' or not path then return end
 
     local title, year, is_tv = clean_filename(path)
     log_verbose(format(
@@ -490,12 +565,12 @@ local function lookup_poster()
     local gen = poster_gen
 
     run_async(function()
-        local poster = tmdb_poster(title, year, is_tv)
+        local hit = tmdb_lookup(title, year, is_tv)
         if gen ~= poster_gen then return end
-        current_poster = poster
+        apply_tmdb_hit(hit)
         tick(true)
-        if poster then
-            probe_wsrv(poster)
+        if hit and hit.poster then
+            probe_wsrv(hit.poster)
         end
     end)
 end
@@ -825,6 +900,7 @@ end
 local last = {
     title = nil, state = nil, pos = -1, dur = -1,
     pause = nil, idle = nil, poster = nil,
+    tmdb_title = nil, tmdb_url = nil,
 }
 local timer = nil
 local activity = {
@@ -867,7 +943,8 @@ end
 tick = function(force)
     if not enabled then return end
 
-    local title = get_property('media-title') or get_property('filename') or 'Unknown'
+    local raw_title = get_property('media-title') or get_property('filename') or 'Unknown'
+    local title = current_tmdb_title or current_clean_title or raw_title
     if #title > 120 then title = sub(title, 1, 117) .. '…' end
 
     local pos   = get_property_number('time-pos') or 0
@@ -886,6 +963,8 @@ tick = function(force)
        and idle == last.idle
        and dur_i == last.dur
        and current_poster == last.poster
+       and current_tmdb_title == last.tmdb_title
+       and current_tmdb_url == last.tmdb_url
        and pos_i == last.pos
     then
         return
@@ -898,8 +977,11 @@ tick = function(force)
     activity.status_display_type = 2
     activity.details             = title
     activity.state               = state
+    activity.details_url         = current_tmdb_url
+    activity.state_url           = current_tmdb_url
     activity.assets.large_image = presence_image(current_poster)
     activity.assets.large_text  = current_poster and title or FALLBACK_TXT
+    activity.assets.large_url   = current_tmdb_url
 
     local small_image, small_text
     if idle then
@@ -936,6 +1018,8 @@ tick = function(force)
         last.pause  = pause
         last.idle   = idle
         last.poster = current_poster
+        last.tmdb_title = current_tmdb_title
+        last.tmdb_url = current_tmdb_url
     end
 end
 
@@ -999,7 +1083,7 @@ end)
 mp.register_event('end-file', function()
     stop_timer()
     watch_time_pos(false)
-    current_poster = nil
+    clear_title_state()
     last.title = nil
     if enabled and RPC.socket then
         RPC:set_activity(nil)
