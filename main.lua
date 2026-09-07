@@ -124,6 +124,7 @@ local current_poster = nil
 local current_clean_title = nil
 local current_tmdb_title = nil
 local current_tmdb_url = nil
+local current_episode = nil
 
 local function load_poster_cache()
     if poster_cache_loaded then return end
@@ -372,7 +373,45 @@ local function clean_filename(path)
     title = gsub(title, '%s+$', '')
 
     -- TMDb search is case-insensitive; skip title-case
-    return title, year, is_tv
+    season = season and tonumber(season) or nil
+    ep = ep and tonumber(ep) or nil
+    if is_tv and ep and not season then
+        season = 1
+    end
+    return title, year, is_tv, season, ep
+end
+
+local function tagged_title()
+    local meta = mp.get_property_native('metadata')
+    if type(meta) ~= 'table' then
+        return nil
+    end
+    local t = meta.title or meta.TITLE or meta.Title
+    if type(t) ~= 'string' then
+        return nil
+    end
+    t = gsub(t, '^%s+', '')
+    t = gsub(t, '%s+$', '')
+    if #t < 2 or match(t, '^https?://') or match(t, '%.%w%w%w%w?$') then
+        return nil
+    end
+    return t
+end
+
+local function chapter_title()
+    local title = get_property('chapter-metadata/title')
+    if title and title ~= '' then
+        return title
+    end
+    local idx = get_property_number('chapter')
+    if not idx then
+        return nil
+    end
+    title = get_property('chapter-list/' .. floor(idx) .. '/title')
+    if title and title ~= '' then
+        return title
+    end
+    return nil
 end
 
 ----------------------------------------------------------------
@@ -435,7 +474,40 @@ local function score_multi_result(r, year, prefer_tv)
     return score
 end
 
-local function tmdb_lookup(title, year, is_tv)
+local function tmdb_get_json(url)
+    local body, status = curl_get(url)
+    if status == 429 then
+        tmdb_backoff_until = mp.get_time() + tmdb_backoff_sec
+        log_warn('TMDb 429, backing off ' .. tmdb_backoff_sec .. 's')
+        tmdb_backoff_sec = math.min(tmdb_backoff_sec * 2, 300)
+        return nil
+    end
+    if (not body or body == '') and status ~= 200 then
+        log_warn('TMDb request failed (status=' .. tostring(status) .. ')')
+        return nil
+    end
+    local data = parse_json(body or '')
+    if not data then
+        log_warn('TMDb response was not JSON (status=' .. tostring(status) .. ')')
+        return nil
+    end
+    tmdb_backoff_sec = 30
+    return data
+end
+
+local function tmdb_episode(show_id, season, ep)
+    if not show_id or not season or not ep then
+        return nil
+    end
+    local url = format(
+        'https://api.themoviedb.org/3/tv/%s/season/%d/episode/%d?api_key=%s&language=%s',
+        tostring(show_id), season, ep, TMDB_KEY, TMDB_LANG
+    )
+    log_verbose(format('TMDb episode id=%s S%02dE%02d', tostring(show_id), season, ep))
+    return tmdb_get_json(url)
+end
+
+local function tmdb_lookup(title, year, is_tv, season, ep)
     if TMDB_KEY == '' or not title or title == '' then
         return nil
     end
@@ -448,6 +520,9 @@ local function tmdb_lookup(title, year, is_tv)
     load_poster_cache()
 
     local key = 'multi:' .. title:lower() .. '|' .. (year or '')
+    if season and ep then
+        key = key .. format('|S%02dE%02d', season, ep)
+    end
     local cached = poster_cache[key]
     if cached == false then
         log_verbose('poster cache hit (no poster)')
@@ -467,24 +542,10 @@ local function tmdb_lookup(title, year, is_tv)
     log_verbose(format('TMDb multi query="%s" year=%s tv_hint=%s',
         title, tostring(year), tostring(is_tv)))
 
-    local body, status = curl_get(url)
-    if status == 429 then
-        tmdb_backoff_until = mp.get_time() + tmdb_backoff_sec
-        log_warn('TMDb 429, backing off ' .. tmdb_backoff_sec .. 's')
-        tmdb_backoff_sec = math.min(tmdb_backoff_sec * 2, 300)
-        return nil
-    end
-    if (not body or body == '') and status ~= 200 then
-        log_warn('TMDb request failed (status=' .. tostring(status) .. ')')
-        return nil
-    end
-
-    local data = parse_json(body or '')
+    local data = tmdb_get_json(url)
     if not data then
-        log_warn('TMDb response was not JSON (status=' .. tostring(status) .. ')')
         return nil
     end
-    tmdb_backoff_sec = 30
     if not data.results or #data.results == 0 then
         remember_poster(key, false)
         log_verbose('TMDb no results')
@@ -501,16 +562,36 @@ local function tmdb_lookup(title, year, is_tv)
     end
 
     if best and best.poster_path then
+        local page = tmdb_page_url(best)
         hit = {
-            poster = 'https://image.tmdb.org/t/p/w500' .. best.poster_path,
-            title  = tmdb_official_title(best),
-            url    = tmdb_page_url(best),
-            type   = best.media_type,
+            poster  = 'https://image.tmdb.org/t/p/w500' .. best.poster_path,
+            title   = tmdb_official_title(best),
+            url     = page,
+            type    = best.media_type,
+            id      = best.id,
+            episode = nil,
         }
+        if best.media_type == 'tv' and best.id and season and ep then
+            local epdata = tmdb_episode(best.id, season, ep)
+            if epdata then
+                if epdata.still_path and #epdata.still_path > 0 then
+                    hit.poster = 'https://image.tmdb.org/t/p/w500' .. epdata.still_path
+                end
+                if epdata.name and #epdata.name > 0 then
+                    hit.episode = epdata.name
+                end
+                if epdata.id then
+                    hit.url = page .. '/season/' .. season .. '/episode/' .. ep
+                end
+            end
+        end
         remember_poster(key, hit)
         log_info('poster -> ' .. hit.poster)
         if hit.title then
             log_info('title  -> ' .. hit.title)
+        end
+        if hit.episode then
+            log_info('episode -> ' .. hit.episode)
         end
         return hit
     end
@@ -526,6 +607,7 @@ local function clear_title_state()
     current_clean_title = nil
     current_tmdb_title = nil
     current_tmdb_url = nil
+    current_episode = nil
 end
 
 local function apply_tmdb_hit(hit)
@@ -533,11 +615,13 @@ local function apply_tmdb_hit(hit)
         current_poster = nil
         current_tmdb_title = nil
         current_tmdb_url = nil
+        current_episode = nil
         return
     end
     current_poster = hit.poster
     current_tmdb_title = hit.title
     current_tmdb_url = hit.url
+    current_episode = hit.episode
 end
 
 local function lookup_poster()
@@ -553,10 +637,11 @@ local function lookup_poster()
 
     if TMDB_KEY == '' or not path then return end
 
-    local title, year, is_tv = clean_filename(path)
+    local title, year, is_tv, season, ep = clean_filename(path)
     log_verbose(format(
-        'cleaned title="%s" year=%s tv=%s',
-        tostring(title), tostring(year), tostring(is_tv)
+        'cleaned title="%s" year=%s tv=%s S%sE%s',
+        tostring(title), tostring(year), tostring(is_tv),
+        tostring(season), tostring(ep)
     ))
 
     if not title or title == '' then return end
@@ -565,7 +650,7 @@ local function lookup_poster()
     local gen = poster_gen
 
     run_async(function()
-        local hit = tmdb_lookup(title, year, is_tv)
+        local hit = tmdb_lookup(title, year, is_tv, season, ep)
         if gen ~= poster_gen then return end
         apply_tmdb_hit(hit)
         tick(true)
@@ -944,7 +1029,7 @@ tick = function(force)
     if not enabled then return end
 
     local raw_title = get_property('media-title') or get_property('filename') or 'Unknown'
-    local title = current_tmdb_title or current_clean_title or raw_title
+    local title = current_tmdb_title or tagged_title() or current_clean_title or raw_title
     if #title > 120 then title = sub(title, 1, 117) .. '…' end
 
     local pos   = get_property_number('time-pos') or 0
@@ -954,6 +1039,10 @@ tick = function(force)
     local pos_i = floor(pos)
     local dur_i = floor(dur)
     local state = presence_state(idle, pause, pos_i, dur_i)
+    local extra = current_episode or chapter_title()
+    if extra and extra ~= '' then
+        state = extra .. ' · ' .. state
+    end
 
     -- While paused/idle the timer is stopped; still skip no-op sends
     if not force
@@ -1118,6 +1207,10 @@ mp.register_event('playback-restart', function()
 end)
 
 mp.observe_property('pause', 'bool', on_pause)
+mp.observe_property('chapter', 'number', function(_, idx)
+    if idx == nil or not enabled then return end
+    tick(true)
+end)
 
 mp.observe_property('idle-active', 'bool', function(_, idle)
     if idle == nil then return end
