@@ -32,7 +32,6 @@ local o = {
     small_image_idle     = 'mpv',
     tmdb_api_key    = '',
     tmdb_language   = 'en-US',
-    update_interval = 15, -- legacy option; retained for config compatibility
     key_toggle      = 'D',
     enabled         = true,
     poster_fit      = 'contain',
@@ -92,6 +91,18 @@ local function log_verbose(s) msg.verbose('discord-mpv-rpc: ' .. s) end
 -- tick is defined later; poster lookup calls it when curl finishes
 local tick
 
+-- Keep outgoing text within a conservative byte budget without splitting UTF-8.
+local function truncate_utf8(text, limit)
+    if #text <= limit then return text end
+    local cut = limit - 3
+    while cut > 0 do
+        local next_byte = byte(text, cut + 1)
+        if not next_byte or next_byte < 0x80 or next_byte >= 0xC0 then break end
+        cut = cut - 1
+    end
+    return sub(text, 1, cut) .. '…'
+end
+
 ----------------------------------------------------------------
 -- Script directory (works for AppData and portable_config)
 -- Cache lives next to this file:
@@ -144,6 +155,8 @@ local tmdb_next_request_at = 0
 -- may finish, but a stale coroutine is stopped before it can launch more
 -- searches, alias requests, or episode requests.
 local tmdb_lookup_generation = 0
+-- Retain one failure marker for the active file, including alias-request failures.
+local tmdb_failed_generation = nil
 
 local function tmdb_lookup_cancelled(token)
     return token ~= nil and token ~= tmdb_lookup_generation
@@ -248,8 +261,12 @@ local function save_poster_cache()
 
     -- Write next to this script. Do not os.execute('mkdir'): that flashes
     -- a Command Prompt on Windows.
-    local encoded = format_json(poster_cache) or '{}'
-    local tmp_path = CACHE_PATH .. '.tmp'
+    local encoded = format_json(poster_cache)
+    if not encoded then
+        log_warn('could not encode poster cache')
+        return
+    end
+    local tmp_path = CACHE_PATH .. '.' .. tostring(PID) .. '.tmp'
     local f = io.open(tmp_path, 'w')
     if not f then
         log_warn('could not write poster cache to ' .. tmp_path)
@@ -257,9 +274,9 @@ local function save_poster_cache()
     end
 
     local ok, err = pcall(function()
-        f:write(encoded)
-        f:flush()
-        f:close()
+        assert(f:write(encoded))
+        assert(f:flush())
+        assert(f:close())
     end)
 
     if not ok then
@@ -278,8 +295,9 @@ local function save_poster_cache()
         renamed = os.rename(tmp_path, CACHE_PATH)
     end
     if not renamed then
-        os.remove(tmp_path)
-        log_warn('could not replace poster cache at ' .. CACHE_PATH)
+        -- Keep the complete temporary copy for recovery, including on Windows
+        -- if removal succeeded but the final rename failed.
+        log_warn('could not replace poster cache; retained ' .. tmp_path)
         return
     end
 
@@ -620,7 +638,7 @@ local function probe_wsrv(tmdb_url)
             log_warn('wsrv failed (' .. tostring(status) .. '), using raw poster for '
                 .. WSRV_FAILURE_TTL .. 's')
         end
-        tick(true)
+        tick(false)
     end)
 end
 
@@ -706,9 +724,10 @@ local function extract_episode_info(name)
 end
 
 local function extract_year(name)
-    return match(name, '%((19%d%d|20%d%d)%)')
-        or match(name, '(19%d%d)')
-        or match(name, '(20%d%d)')
+    return match(name, '%((19%d%d)%)')
+        or match(name, '%((20%d%d)%)')
+        or match(name, '%f[%d](19%d%d)%f[%D]')
+        or match(name, '%f[%d](20%d%d)%f[%D]')
 end
 
 local function derive_title(name, year, is_tv)
@@ -753,10 +772,14 @@ local function normalize_filename_title(title)
         'PROPER', 'REPACK', 'REMUX', 'x26[45]', 'h26[45]', 'HEVC',
         'AAC', 'AC3', 'DTS', 'DDP%d*', 'Atmos', '%d%d%d%dp', '%dK',
     }
-    for i = 1, #release_suffixes do
-        title = gsub(title, '%s*[%._%-]%s*' .. release_suffixes[i] .. '%s*$', '')
-        title = gsub(title, '%s+' .. release_suffixes[i] .. '%s*$', '')
-    end
+    local previous
+    repeat
+        previous = title
+        for i = 1, #release_suffixes do
+            title = gsub(title, '%s*[%._%-]%s*' .. release_suffixes[i] .. '%s*$', '')
+            title = gsub(title, '%s+' .. release_suffixes[i] .. '%s*$', '')
+        end
+    until title == previous
 
     title = gsub(title, '%s+', ' ')
     title = gsub(title, '^%s+', '')
@@ -768,7 +791,7 @@ local function directory_context(path)
     local dir = parent_directory(path)
     if not dir or dir == '' then return nil, nil end
 
-    local name = basename_without_extension(dir)
+    local name = match(dir, '([^/\\]+)$') or dir
     local year = extract_year(name)
     if not year then return nil, nil end
 
@@ -1079,10 +1102,18 @@ local function tmdb_get_json(url, inflight)
     end
 
     local data = parse_json(body)
-    if not data then
-        log_warn('TMDb response was not JSON')
+    if type(data) ~= 'table' then
+        log_warn('TMDb response was not a JSON object')
         return nil, 'invalid_json'
     end
+    if url:find('/search/', 1, true) and type(data.results) ~= 'table' then
+        return nil, 'invalid_response'
+    end
+    if url:find('/alternative_titles?', 1, true)
+        and type(data.titles or data.results) ~= 'table' then
+        return nil, 'invalid_response'
+    end
+    if transport_error then return nil, 'transport' end
 
     tmdb_backoff_sec = 30
     return data, 'ok'
@@ -1171,7 +1202,7 @@ local function tmdb_wait_for_request_slot(lookup_token, inflight)
         or (inflight and #inflight.waiters > 0)
 end
 
-local function tmdb_get_json_cached(url, lookup_token, cache_response)
+local function tmdb_get_json_cached_impl(url, lookup_token, cache_response)
     if tmdb_lookup_cancelled(lookup_token) then
         return nil, 'cancelled'
     end
@@ -1214,7 +1245,7 @@ local function tmdb_get_json_cached(url, lookup_token, cache_response)
     end
 
     if not tmdb_wait_for_request_slot(lookup_token, inflight) then
-        tmdb_inflight[url] = nil
+        if tmdb_inflight[url] == inflight then tmdb_inflight[url] = nil end
         tmdb_resume_waiters(inflight, nil, 'cancelled')
         return nil, 'cancelled'
     end
@@ -1246,6 +1277,15 @@ local function tmdb_get_json_cached(url, lookup_token, cache_response)
 
     if tmdb_lookup_cancelled(lookup_token) then
         return nil, 'cancelled'
+    end
+    return data, outcome
+end
+
+local function tmdb_get_json_cached(url, lookup_token, cache_response)
+    local data, outcome = tmdb_get_json_cached_impl(url, lookup_token, cache_response)
+    if outcome ~= 'ok' and outcome ~= 'cancelled'
+        and lookup_token == tmdb_lookup_generation then
+        tmdb_failed_generation = lookup_token
     end
     return data, outcome
 end
@@ -1792,11 +1832,7 @@ local function tmdb_lookup(
         return nil
     end
 
-    if mp.get_time() < tmdb_backoff_until then
-        log_verbose('TMDb backoff active, skipping request')
-        return nil
-    end
-
+    -- Cache hits remain available while HTTP requests are backing off.
     load_poster_cache()
 
     local cache_title = gsub(title:lower(), '%s+', ' ')
@@ -1969,6 +2005,7 @@ local function tmdb_lookup(
         end
 
         if #pool == 0 then
+            if tmdb_failed_generation == lookup_token then return nil end
             remember_poster(key, {
                 negative = true, cache_version = 2,
                 expires_at = time() + TMDB_NEGATIVE_CACHE_TTL
@@ -1996,6 +2033,10 @@ local function tmdb_lookup(
         end
 
         if not confident then
+            if tmdb_failed_generation == lookup_token then
+                log_verbose('TMDb lookup incomplete; not caching a miss')
+                return nil
+            end
             remember_poster(key, {
                 negative = true, cache_version = 2,
                 expires_at = time() + TMDB_NEGATIVE_CACHE_TTL
@@ -2190,7 +2231,7 @@ local function lookup_poster()
         )
         if gen ~= tmdb_lookup_generation then return end
         apply_tmdb_hit(hit)
-        tick(true)
+        tick(false)
         if hit and hit.poster then
             probe_wsrv(hit.poster)
         end
@@ -2207,6 +2248,7 @@ local RPC = {
 }
 
 local ffi = _G.jit and require 'ffi' or nil
+local bit = ffi and require 'bit' or nil
 
 local function ipc_paths()
     local list = {}
@@ -2297,6 +2339,21 @@ if ffi and RPC.unix then
         return bit.band(pfd[0].revents, POLLIN + POLLERR + POLLHUP) ~= 0
     end
 
+    function RPC:read_available()
+        local pfd = ffi.new('struct pollfd[1]')
+        pfd[0].fd, pfd[0].events = self.socket, POLLIN
+        local ready = C.poll(pfd, 1, 0)
+        if ready == 0 then return '' end
+        if ready < 0 then return nil end
+        local n = C.recv(self.socket, recv_buf, RECV_SIZE, 0)
+        if n > 0 then return ffi.string(recv_buf, n) end
+        if n < 0 then
+            local err = ffi.errno()
+            if err == 4 or err == 11 or err == 35 then return '' end
+        end
+        return nil
+    end
+
     local SEND_SIZE = 65536
     local send_buf = ffi.new('char[?]', SEND_SIZE)
 
@@ -2368,6 +2425,7 @@ elseif ffi and not RPC.unix then
         BOOL WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, void*);
         BOOL ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, void*);
         BOOL CloseHandle(HANDLE);
+        BOOL PeekNamedPipe(HANDLE, LPVOID, DWORD, LPDWORD, LPDWORD, LPDWORD);
     ]]
     local C = ffi.C
     local INVALID = ffi.cast('HANDLE', -1)
@@ -2377,6 +2435,19 @@ elseif ffi and not RPC.unix then
     local recv_buf = ffi.new('char[?]', 4096)
     local written  = ffi.new('DWORD[1]')
     local readn    = ffi.new('DWORD[1]')
+    local available = ffi.new('DWORD[1]')
+
+    function RPC:read_available()
+        if C.PeekNamedPipe(self.socket, nil, 0, nil, available, nil) == 0 then
+            return nil
+        end
+        if available[0] == 0 then return '' end
+        local want = math.min(4096, tonumber(available[0]))
+        if C.ReadFile(self.socket, recv_buf, want, readn, nil) == 0 or readn[0] == 0 then
+            return nil
+        end
+        return ffi.string(recv_buf, readn[0])
+    end
 
     -- UTF-8 -> UTF-16 for Windows wide-character APIs.
     -- Windows wchar_t is a 16-bit UTF-16 code unit, so supplementary
@@ -2525,8 +2596,8 @@ elseif not RPC.unix then
     function RPC:send_raw(data)
         if not self.socket then return false end
         local ok, err = pcall(function()
-            self.socket:write(data)
-            self.socket:flush()
+            assert(self.socket:write(data))
+            assert(self.socket:flush())
         end)
         return ok and err == nil
     end
@@ -2567,15 +2638,22 @@ else
         return false
     end
 
+    function RPC:read_available()
+        self.socket:settimeout(0)
+        local data, err, partial = self.socket:receive(4096)
+        self.socket:settimeout(1.5)
+        local chunk = data or partial
+        if chunk and #chunk > 0 then return chunk end
+        if err == 'timeout' then return '' end
+        return nil
+    end
+
     function RPC:send_raw(data)
         if not self.socket then return false end
-        local sent, total = 0, #data
-        while sent < total do
-            local n = self.socket:send(data, sent + 1)
-            if not n then return false end
-            sent = sent + n
-        end
-        return true
+        -- LuaSocket returns the absolute last byte index, including on a
+        -- partial send. A failed send closes the connection at the caller.
+        local last_byte = self.socket:send(data)
+        return last_byte == #data
     end
 
     function RPC:recv_raw(n)
@@ -2627,6 +2705,83 @@ end
 local function rpc_note_success()
     rpc_backoff_until = 0
     rpc_backoff_sec = 1
+end
+
+do
+    local transport_close = RPC.close
+    function RPC:close()
+        if self.reader_timer then self.reader_timer:kill() end
+        self.reader_timer = nil
+        self.rx_buffer = ''
+        self.rx_started_at = nil
+        transport_close(self)
+    end
+end
+
+function RPC:connection_failed(reason)
+    log_warn(reason)
+    self:close()
+    rpc_note_failure()
+    if self.on_disconnect then self.on_disconnect() end
+end
+
+function RPC:drain_frames()
+    -- Bound work per callback; preserve fragmented headers and bodies.
+    for _ = 1, 64 do
+        if #self.rx_buffer < 8 then return true end
+        local valid, op, len = valid_rpc_header(sub(self.rx_buffer, 1, 8))
+        if not valid or op < 1 or op > 4 then return false end
+        if #self.rx_buffer < 8 + len then return true end
+        local payload = sub(self.rx_buffer, 9, 8 + len)
+        self.rx_buffer = sub(self.rx_buffer, 9 + len)
+        self.rx_started_at = #self.rx_buffer > 0 and mp.get_time() or nil
+        if op == 2 then
+            log_verbose('Discord sent a close frame: ' .. payload)
+            return false
+        elseif op == 3 then
+            if not self:send_raw(pack(4, payload)) then return false end
+        elseif op == 1 then
+            local response = parse_json(payload)
+            if type(response) ~= 'table' then return false end
+            if response.evt == 'ERROR' then
+                local data = type(response.data) == 'table' and response.data or {}
+                log_warn('Discord RPC error (nonce=' .. tostring(response.nonce)
+                    .. '): ' .. tostring(data.message or data.code or 'unknown'))
+            end
+        end
+    end
+    return true
+end
+
+function RPC:start_reader()
+    if self.reader_timer then return end
+    if not self.read_available then
+        log_warn('LuaJIT is required on Windows for background IPC disconnect detection')
+        return
+    end
+    self.rx_buffer = ''
+    self.reader_timer = mp.add_periodic_timer(0.25, function()
+        if not self.socket then return end
+        for _ = 1, 32 do
+            local chunk = self:read_available()
+            if chunk == nil then
+                self:connection_failed('Discord IPC disconnected')
+                return
+            end
+            if chunk ~= '' then
+                if #self.rx_buffer == 0 then self.rx_started_at = mp.get_time() end
+                self.rx_buffer = self.rx_buffer .. chunk
+            end
+            if not self:drain_frames() or #self.rx_buffer > MAX_RPC_FRAME + 8 then
+                self:connection_failed('Discord IPC received an invalid frame')
+                return
+            end
+            if chunk == '' then break end
+        end
+        if self.rx_started_at and mp.get_time() - self.rx_started_at > 5 then
+            self:connection_failed('Discord IPC partial frame timed out')
+        end
+    end)
 end
 
 function RPC:handshake()
@@ -2686,6 +2841,7 @@ function RPC:handshake()
     end
 
     rpc_note_success()
+    self:start_reader()
     log_info('connected to Discord')
     return true
 end
@@ -2695,17 +2851,17 @@ function RPC:set_activity(activity)
         return false
     end
 
-    local body = format_json{
-        cmd   = 'SET_ACTIVITY',
-        nonce = next_nonce(),
-        args  = { pid = PID, activity = activity },
-    }
+    local encoded = 'null'
+    if activity ~= nil then
+        encoded = format_json(activity)
+        if not encoded then return false end
+    end
+    local body = '{"cmd":"SET_ACTIVITY","nonce":' .. format_json(next_nonce())
+        .. ',"args":{"pid":' .. tostring(PID) .. ',"activity":' .. encoded .. '}}'
 
     if not self:send_raw(pack(1, body)) then
-        log_warn('send failed - reconnecting')
-        self:close()
-        if not self:handshake() then return false end
-        return self:send_raw(pack(1, body))
+        self:connection_failed('Discord IPC send failed')
+        return false
     end
     return true
 end
@@ -2768,6 +2924,8 @@ local function start_reconnect_watchdog()
     end)
 end
 
+RPC.on_disconnect = start_reconnect_watchdog
+
 local function playback_state_label(idle, pause)
     if idle then return 'Idle' end
     if pause then return 'Paused' end
@@ -2779,15 +2937,16 @@ tick = function(force)
 
     local raw_title = get_property('media-title') or get_property('filename') or 'Unknown'
     local title = current_tmdb_title or tagged_title() or current_clean_title or raw_title
-    if #title > 120 then title = sub(title, 1, 117) .. '…' end
+    title = truncate_utf8(title, 120)
 
-    local pause = get_property_bool('pause')
+    local pause = get_property_bool('pause') or get_property_bool('paused-for-cache')
     local idle  = get_property_bool('idle-active')
     local extra = current_episode or meaningful_chapter_title()
-    local state = (extra and extra ~= '') and extra or playback_state_label(idle, pause)
+    local state = truncate_utf8(
+        (extra and extra ~= '') and extra or playback_state_label(idle, pause), 120)
 
     local large_image = presence_image(current_poster)
-    local large_text = current_poster and title or FALLBACK_TXT
+    local large_text = truncate_utf8(current_poster and title or FALLBACK_TXT, 120)
 
     local small_image, small_text
     if idle then
@@ -2842,11 +3001,12 @@ tick = function(force)
     local pos = get_property_number('time-pos') or 0
     local dur = get_property_number('duration') or 0
     if not idle and not pause and dur > 0 then
-        local pos_i = floor(pos)
-        local dur_i = floor(dur)
+        local speed = get_property_number('speed') or 1
+        if speed <= 0 then speed = 1 end
+        pos = math.max(0, math.min(pos, dur))
         local now = time()
-        timestamps.start  = now - pos_i
-        timestamps['end'] = now - pos_i + dur_i
+        timestamps.start  = floor(now - pos / speed)
+        timestamps['end'] = floor(now + (dur - pos) / speed)
         activity.timestamps = timestamps
     else
         activity.timestamps = nil
@@ -2922,6 +3082,13 @@ mp.register_event('playback-restart', function()
 end)
 
 mp.observe_property('pause', 'bool', on_pause)
+mp.observe_property('paused-for-cache', 'bool', on_pause)
+mp.observe_property('speed', 'number', function(_, speed)
+    if speed ~= nil and enabled then tick(true) end
+end)
+mp.observe_property('duration', 'number', function(_, duration)
+    if duration ~= nil and enabled then tick(true) end
+end)
 
 mp.observe_property('chapter', 'number', function(_, idx)
     if idx == nil or not enabled then return end
@@ -2960,12 +3127,14 @@ mp.add_key_binding(KEY_TOGGLE, 'discord-mpv-rpc-toggle', function()
     else
         stop_reconnect_watchdog()
         if RPC.socket then RPC:set_activity(nil) end
+        RPC:close()
         mp.osd_message('Discord RPC: off')
     end
 end)
 
 if enabled then
     mp.add_timeout(1.5, function()
+        if not enabled then return end
         load_poster_cache()
         if RPC:handshake() then
             reset_presence_state()
