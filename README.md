@@ -1,6 +1,10 @@
 # discord-mpv-rpc
 
 <p align="center">
+  <a href="https://discord.com/">
+    <img src="assets/discord-logo.svg" alt="Discord" width="112">
+  </a>
+  &nbsp;&nbsp;&nbsp;
   <a href="https://www.themoviedb.org/">
     <img src="assets/tmdb-logo.svg" alt="TMDb" width="96">
   </a>
@@ -155,6 +159,7 @@ small_image_idle=mpv
 poster_fit=contain
 enabled=yes
 ```
+
 
 ## Rich Presence behavior
 
