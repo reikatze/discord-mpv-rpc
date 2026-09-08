@@ -43,6 +43,7 @@ Presence updates are event-driven. There is no periodic elapsed/remaining-time t
 - Staged TV search with year-aware matching, directory context, original titles, and alternate-title fallback
 - Exact TMDb episode lookup only — the script does **not** remap a missing season/episode to another TMDb season
 - Filename parsing for common movie, TV, scene, and anime naming patterns
+- Case-insensitive cleanup of stacked release tags, codec/audio details, and recognized release groups before TMDb matching
 - Parent-directory year/title context for folders such as `Show Name (2026)`
 - Persistent show, episode, and season-count cache across mpv sessions
 - Bounded in-memory request/alias/parser caches
@@ -258,7 +259,22 @@ Movie Name (2026).mkv
 Movie.Name.2026.1080p.BluRay.mkv
 ```
 
-Release-group brackets, dots/underscores, year markers, episode markers, and other common filename noise are cleaned before matching.
+### Release-tag cleanup
+
+Before TMDb matching, the script removes square-bracketed metadata and recognized trailing release tags. Tag matching is case-insensitive and repeats until stacked tags have been removed. Dots and underscores in the derived title become spaces; year and episode markers are parsed separately from the search title.
+
+| Type | Examples removed |
+|---|---|
+| Source / release format | `WEBDL`, `WEB-DL`, `WEBRip`, `BluRay`, `Blu-Ray`, `BRRip`, `BDRip`, `HDRip`, `DVDRip`, `HDTV`, `REMUX` |
+| Resolution | `480p`, `576p`, `720p`, `1080p`, `2160p`, `4320p`, their `i` variants, `2K`, `4K`, `8K` |
+| Video codec / bit depth | `h264`, `H.264`, `x264`, `x265`, `HEVC`, `AVC`, `AV1`, `8bit`, `10bit`, `12bit` |
+| Audio | `EAC3`, `E-AC3`, `AC3`, `AAC`, `DTS`, `DTS-HD`, `TrueHD`, `DDP`, `Atmos`, `FLAC`, `Opus`, `MP3`, channel layouts such as `5.1` and `7.1.4` |
+| Other technical / release tags | `HDR`, `HDR10`, `HDR10+`, `SDR`, `PROPER`, `REPACK`, `AMZN`, `NF`, `DSNP`, `HMAX` |
+| Recognized release groups | `Judas`, `SubsPlease`, `HorribleSubs` |
+
+Square-bracketed groups such as `[Judas]` are removed wherever they occur. Recognized unbracketed groups are removed at the end, or at the start when followed by a dash, such as `Judas - Movie`. A bare group name at the start without a dash is preserved to avoid damaging titles such as `Judas and the Black Messiah`. Technical tags are removed at the end of the filename or derived title, rather than from arbitrary words inside a title.
+
+Release metadata is also stripped before episode detection, so `Show - 04 [1080p]` and `Show - 04v2 1080p x265 10bit` can be recognized as season 1, episode 4. This cleanup changes the search text; it does not rename media files.
 
 Examples of parsed filenames:
 
@@ -266,9 +282,14 @@ Examples of parsed filenames:
 |---|---|
 | `1984 (2023).mkv` | Title `1984`, year `2023` |
 | `Movie.1080p.WEB-DL.x265.AAC.mkv` | Title `Movie` |
+| `Movie.WEBDL.1080p.EAC3.h264-Judas.mkv` | Title `Movie` |
+| `Movie.bLuRaY.x264.x265.10bit-SubsPlease.mkv` | Title `Movie` |
+| `[HorribleSubs] Show - 04v2 1080p EAC3 5.1 x265 10bit.mkv` | Title `Show`, season 1, episode 4 |
+| `[Judas] Dragon Ball Daima - S01E04v2.mkv` | Title `Dragon Ball Daima`, season 1, episode 4 |
+| `[SubsPlease] Show - 04 [1080p].mkv` | Title `Show`, season 1, episode 4 |
 | `Show.Name.(2026)/Show.S01E02.mkv` | Title `Show`, year `2026`, season 1, episode 2 |
 
-Filename parsing remains heuristic; unusual naming conventions can still need cleanup.
+Filename parsing remains heuristic; unknown unbracketed release groups and unusual naming conventions can still need manual cleanup. Parsed titles are search inputs; the displayed title uses the official TMDb title when a match is found.
 
 When useful, the script can also inherit title/year context from a parent directory containing a year, for example:
 
