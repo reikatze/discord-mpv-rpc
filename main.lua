@@ -1353,6 +1353,43 @@ local function tmdb_episode_persistent_key(show_id, season, ep)
     return format('episode:%s:S%02dE%02d:%s', tostring(show_id), season, ep, TMDB_LANG)
 end
 
+local function tmdb_season_episode_count(show_id, season, lookup_token)
+    local key = format('season-count:%s:S%02d', tostring(show_id), season)
+    local cached = poster_cache[key]
+    if type(cached) == 'table' and not persistent_entry_expired(cached) then
+        return cached.count
+    end
+
+    local url = format(
+        'https://api.themoviedb.org/3/tv/%s/season/%d?api_key=%s&language=%s',
+        tostring(show_id), season, TMDB_KEY, url_encode(TMDB_LANG))
+    local data, outcome = tmdb_get_json_cached(url, lookup_token, false)
+    if outcome == 'cancelled' or tmdb_lookup_cancelled(lookup_token) then
+        return nil
+    end
+
+    local count
+    if data and tonumber(data.season_number) == tonumber(season)
+        and type(data.episodes) == 'table' and #data.episodes > 0 then
+        count = #data.episodes
+    end
+    -- Keep only the count. Refresh daily for ongoing seasons; retry missing
+    -- totals after an hour without discarding a successful episode lookup.
+    remember_poster(key, {
+        count = count,
+        expires_at = time() + (count and 24 * 60 * 60 or 60 * 60),
+    })
+    return count
+end
+
+local function format_episode_title(ep, total, title)
+    local label = format('%02d', ep)
+    if total and total >= ep then
+        label = label .. format(' of %d', total)
+    end
+    return label .. ': ' .. title
+end
+
 local function tmdb_alternative_titles(result, lookup_token)
     if not result or not result.id then
         return nil
@@ -2164,6 +2201,17 @@ local function tmdb_lookup(
                 })
             end
         end
+    end
+
+    if hit.episode and hit.episode ~= '' and season and ep then
+        local total = tmdb_season_episode_count(hit.id, season, lookup_token)
+        if tmdb_lookup_cancelled(lookup_token) then return nil end
+        -- Format a copy so both old and new cache entries retain the raw
+        -- title, and repeated playback never adds the number twice.
+        local display_hit = {}
+        for field, value in pairs(hit) do display_hit[field] = value end
+        display_hit.episode = format_episode_title(ep, total, hit.episode)
+        return display_hit
     end
 
     return hit
