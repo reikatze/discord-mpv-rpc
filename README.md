@@ -23,12 +23,12 @@ Show what you are watching in [mpv](https://mpv.io/) as Discord Rich Presence. A
 - Reconnects automatically when Discord restarts
 - Caches metadata across mpv sessions
 - Optionally uses a local TMDb title index to reduce online searches
-- Updates only when playback state changesâ€”there is no constant presence polling
+- Updates only when playback state changes; there is no constant presence polling
 
 ## Requirements
 
 - [mpv](https://mpv.io/)
-- Discord desktop with **Settings â†’ Activity Privacy â†’ Display current activity as a status message** enabled
+- Discord desktop with **Settings > Activity Privacy > Display current activity as a status message** enabled
 - [`curl`](https://curl.se/) on `PATH` for TMDb metadata and artwork
 - A free [TMDb API key](https://www.themoviedb.org/settings/api) for TMDb features
 
@@ -42,14 +42,14 @@ Copy this structure into mpv's configuration directory:
 
 ```text
 scripts/
-â””â”€â”€ discord-mpv-rpc/
-    â”œâ”€â”€ main.lua
-    â”œâ”€â”€ modules/
-    â”œâ”€â”€ db/
-    â””â”€â”€ tools/
++-- discord-mpv-rpc/
+    |-- main.lua
+    |-- modules/
+    |-- db/
+    +-- tools/
 
 script-opts/
-â””â”€â”€ discord-mpv-rpc.conf
++-- discord-mpv-rpc.conf
 ```
 
 | OS | mpv configuration directory |
@@ -147,7 +147,7 @@ When `tmdb_local_index=yes`, a detached mpv worker checks the index at startup a
 - corrupted
 - at least seven days old
 
-The updater is pure Lua and uses mpv, LuaJIT, and the existing `curl` executableâ€”no Python, database engine, or unzip tool is required. Playback, cached results, and online TMDb searches continue while maintenance runs. Completed indexes are picked up automatically.
+The updater is pure Lua and uses mpv, LuaJIT, and the existing `curl` executable; no Python, database engine, or unzip tool is required. Playback, cached results, and online TMDb searches continue while maintenance runs. Completed indexes are picked up automatically.
 
 Set `tmdb_local_index=no` to disable both lookup and automatic maintenance. `Ctrl+D` toggles them for the current session without rewriting the configuration; it does not stop a worker already running.
 
