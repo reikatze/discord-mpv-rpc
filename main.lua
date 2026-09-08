@@ -1,5 +1,5 @@
 -- mpv Discord Rich Presence: module loading and per-script shared state.
--- Install this file as main.lua with companion Lua files in the modules subdirectory.
+-- Install main.lua alongside the modules and db subdirectories.
 local script_dir = mp.get_script_directory()
 if not script_dir or script_dir == '' then
     local source = debug.getinfo(1, 'S').source
@@ -18,6 +18,8 @@ end
 
 load_module('config')
 load_module('helpers')
+load_module('database')
+load_module('tmdb_index')
 load_module('cache')
 load_module('http')
 load_module('filename')
