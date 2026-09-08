@@ -72,7 +72,9 @@ Install the script in its own subdirectory under mpv's `scripts/` directory. The
 
 ### Standard config
 
-Copy `main.lua` to:
+Copy `main.lua` and the entire **`modules/` folder** into `scripts/discord-mpv-rpc/`, preserving the folder structure. Keep all companion Lua files inside `modules/`.
+
+Place `main.lua` at:
 
 | OS | Script path |
 |---|---|
@@ -95,7 +97,26 @@ If `portable_config` is next to `mpv.exe`:
 | Script | `<mpv_dir>\portable_config\scripts\discord-mpv-rpc\main.lua` |
 | Config | `<mpv_dir>\portable_config\script-opts\discord-mpv-rpc.conf` |
 
-mpv will auto-load `scripts/discord-mpv-rpc/main.lua`.
+mpv will auto-load `scripts/discord-mpv-rpc/main.lua`. For portable installations, place the `modules/` folder beside `main.lua` as well. Keep your existing `discord-mpv-rpc.conf`; its options are unchanged.
+
+### Source layout
+
+Each module is a factory with explicit dependencies. Private implementation state stays local; the small shared state table keeps current metadata, cancellation, cache ownership, and the presence callback synchronized. `main.lua` loads dependencies before registering playback events.
+
+| File | Responsibility |
+|---|---|
+| `main.lua` | Load modules and create per-script shared state |
+| `modules/config.lua` | Defaults, user options, platform constants |
+| `modules/helpers.lua` | Logging, UTF-8 truncation, paths, memory-cache trimming |
+| `modules/cache.lua` | Persistent poster cache, expiry, deferred saves |
+| `modules/http.lua` | curl requests, coroutine execution, URL encoding |
+| `modules/artwork.lua` | Poster fitting and wsrv availability/fallback |
+| `modules/filename.lua` | Release-tag cleanup, title/year/episode parsing, chapter titles |
+| `modules/tmdb_requests.lua` | Request caching, coalescing, cancellation, pacing and backoff |
+| `modules/tmdb.lua` | Candidate scoring, aliases, searches and episode metadata |
+| `modules/metadata.lua` | Active-file lookup and current display metadata |
+| `modules/ipc.lua` | Discord framing, platform transports, handshake and protocol |
+| `modules/presence.lua` | Activity formatting, timestamps, reconnects and mpv events |
 
 ## Discord application setup
 
