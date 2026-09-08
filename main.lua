@@ -757,31 +757,50 @@ local function derive_title(name, year, is_tv)
     return name
 end
 
-local function normalize_filename_title(title)
-    title = gsub(title, '%b[]', ' ')
-    title = gsub(title, '%b()', ' ')
-    title = gsub(title, '[%.%_]', ' ')
-    title = gsub(title, '%s*%-%s*$', '')
-    title = gsub(title, '^%s*%-%s*', '')
+-- Match tags on a lowercase copy, retaining the original title's spelling.
+-- Keep matching at release boundaries so words inside real titles survive.
+local release_suffixes = {
+    'web[%.%s%-]?dl', 'webrip', 'blu[%.%s%-]?ray', 'b[dr]rip',
+    'hdrip', 'dvdrip', 'hdtv', 'amzn', 'nf', 'dsnp', 'hmax',
+    'proper', 'repack', 'remux', '[xh][%.%s%-]?26[45]', 'hevc', 'avc',
+    'av1', 'aac', 'e[%.%s%-]?ac3', 'ac3', 'dts[%.%s%-]?hd', 'dts',
+    'truehd', 'ddp%d*', 'atmos', 'flac', 'opus', 'mp3',
+    '[257][%. ]1', '[257][%. ]1[%. ]%d',
+    '480[pi]', '576[pi]', '720[pi]', '1080[pi]', '2160[pi]', '4320[pi]',
+    '[248]k', '10[%.%s%-]?bit', '8[%.%s%-]?bit', '12[%.%s%-]?bit',
+    'hdr10%+?', 'hdr', 'sdr', 'judas', 'subsplease', 'horriblesubs',
+}
 
-    -- Remove common release tags only when they occur at the end of the
-    -- derived title. These are deliberately conservative so legitimate
-    -- words/numbers in titles are not stripped.
-    local release_suffixes = {
-        'WEB%-DL', 'WEBRip', 'Blu%-Ray', 'BluRay', 'BRRip', 'HDRip',
-        'DVDRip', 'HDTV', 'AMZN', 'NF', 'DSNP', 'HMAX', 'MAX',
-        'PROPER', 'REPACK', 'REMUX', 'x26[45]', 'h26[45]', 'HEVC',
-        'AAC', 'AC3', 'DTS', 'DDP%d*', 'Atmos', '%d%d%d%dp', '%dK',
-    }
+local function strip_filename_release_tags(name)
+    name = gsub(name, '%b[]', ' ')
+    -- Unbracketed group prefixes require a dash, avoiding damage to titles
+    -- such as "Judas and the Black Messiah".
+    for _, group in ipairs({'judas', 'subsplease', 'horriblesubs'}) do
+        local _, last = name:lower():find('^%s*' .. group .. '%s*%-%s*')
+        if last then name = sub(name, last + 1) end
+    end
+
     local previous
     repeat
-        previous = title
+        previous = name
+        name = gsub(name, '[%s%._%-]+$', '')
         for i = 1, #release_suffixes do
-            title = gsub(title, '%s*[%._%-]%s*' .. release_suffixes[i] .. '%s*$', '')
-            title = gsub(title, '%s+' .. release_suffixes[i] .. '%s*$', '')
+            local tag = release_suffixes[i]
+            local lower = name:lower()
+            local first = lower:find('[%s%._%-]+' .. tag .. '$')
+                or lower:find('[%s%._%-]+%(' .. tag .. '%)$')
+            if first then name = sub(name, 1, first - 1) end
         end
-    until title == previous
+    until name == previous
+    return name
+end
 
+local function normalize_filename_title(title)
+    title = strip_filename_release_tags(title)
+    title = gsub(title, '%b()', ' ')
+    title = gsub(title, '[%.%_]', ' ')
+    title = strip_filename_release_tags(title)
+    title = gsub(title, '^%s*%-%s*', '')
     title = gsub(title, '%s+', ' ')
     title = gsub(title, '^%s+', '')
     title = gsub(title, '%s+$', '')
@@ -822,7 +841,8 @@ local function clean_filename(path)
     end
 
     local name = basename_without_extension(path)
-    name = gsub(name, '^%b[]%s*', '')
+    -- Strip release metadata before parsing bare anime episode numbers.
+    name = strip_filename_release_tags(name)
 
     local season, ep, is_tv = extract_episode_info(name)
     local year = extract_year(name)
