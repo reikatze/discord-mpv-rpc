@@ -7,7 +7,7 @@
 
 Discord Rich Presence for [mpv](https://mpv.io/) with optional movie/TV artwork and episode metadata from [TMDb](https://www.themoviedb.org/).
 
-The script publishes the current media title to Discord as **Watching `<title>`**, shows play/pause/idle state with optional small assets, and uses Discord timestamps for the playback progress bar. When a TMDb API key is configured, it can resolve movie/TV titles from release filenames, use TMDb artwork as the large image, and display TV episode names/stills when TMDb has the requested episode.
+The script publishes the current media title to Discord as **Watching `<title>`**, shows play/pause/idle state with optional small assets, and uses Discord timestamps for the playback progress bar. When a TMDb API key is configured, it can resolve movie/TV titles from release filenames, use TMDb artwork as the large image, and display numbered TV episode titles and stills when TMDb has the requested episode, including the season total when available.
 
 Presence updates are event-driven. There is no periodic elapsed/remaining-time text refresh; Discord animates the progress bar from the timestamps it already has.
 
@@ -15,7 +15,7 @@ Presence updates are event-driven. There is no periodic elapsed/remaining-time t
 
 <p align="center">
   <img src="assets/preview-1.png" alt="Discord Rich Presence showing Dragon Ball DAIMA" width="48%">
-  <img src="assets/preview-2.png" alt="Discord Rich Presence showing Labyrinth" width="48%">
+  <img src="assets/preview-2.png" alt="Discord Rich Presence showing The Boy And The Heron" width="48%">
 </p>
 
 <p align="center">
@@ -34,7 +34,8 @@ Presence updates are event-driven. There is no periodic elapsed/remaining-time t
   4. mpv `media-title`
 - Event-driven Discord updates on file load, pause/resume, buffering, speed/duration changes, seek/playback restart, chapter changes, idle state, and TMDb result arrival
 - Speed-aware Discord progress bar while playing, with timestamps removed while paused or buffering
-- TMDb episode title or meaningful chapter title on the state line when available
+- Numbered TMDb episode titles on the state line: `04 of 20: Chatty`, or `04: Chatty` when the season total is unavailable
+- Meaningful chapter titles when no TMDb episode title is available
 - Optional play / pause / idle small-image assets
 - Optional TMDb movie/TV artwork via asynchronous `curl`
 - TV episode stills when the filename contains a recognized season/episode
@@ -43,7 +44,7 @@ Presence updates are event-driven. There is no periodic elapsed/remaining-time t
 - Exact TMDb episode lookup only — the script does **not** remap a missing season/episode to another TMDb season
 - Filename parsing for common movie, TV, scene, and anime naming patterns
 - Parent-directory year/title context for folders such as `Show Name (2026)`
-- Persistent show/episode cache across mpv sessions
+- Persistent show, episode, and season-count cache across mpv sessions
 - Bounded in-memory request/alias/parser caches
 - TMDb request pacing, request coalescing, stale-request cancellation, and 429 backoff
 - Optional square/letterboxed poster rendering through [wsrv.nl](https://wsrv.nl/), with automatic fallback to the raw TMDb image
@@ -138,7 +139,7 @@ All options live in `script-opts/discord-mpv-rpc.conf`. Edit this file before st
 | `client_id` | *(required)* | Your Discord application ID |
 | `tmdb_api_key` | empty | TMDb API key. Leave empty to disable TMDb lookups |
 | `tmdb_language` | `en-US` | TMDb language used for searches and metadata |
-| `tmdb_episode_lookup` | `yes` | Look up exact TMDb TV episodes when season/episode information is parsed |
+| `tmdb_episode_lookup` | `yes` | Look up exact TMDb TV episode titles/stills and season totals when season/episode information is parsed |
 | `key_toggle` | `D` | Key binding used to enable/disable Rich Presence |
 | `large_image` | `mpv` | Fallback Discord large-image asset key |
 | `large_text` | `mpv` | Hover text for the fallback large image |
@@ -181,9 +182,27 @@ The Discord title is chosen in this order:
 
 The state line uses:
 
-1. TMDb episode name
+1. TMDb episode title formatted as `<episode number> of <season total>: <episode title>`, or `<episode number>: <episode title>` when the total is unavailable
 2. Meaningful chapter title
 3. Playing / Paused / Idle
+
+Episode numbers are padded to at least two digits (`03`, `04`, `104`). The total is the number of episodes TMDb lists for the requested season, not the entire series. It is omitted if unavailable or smaller than the current episode number. The episode title comes from TMDb in the configured language, even when the filename contains a different title.
+
+For example, with a season total of 20:
+
+```text
+Dragon Ball DAIMA
+04 of 20: Chatty
+```
+
+When the total is unavailable, the same episode displays:
+
+```text
+Dragon Ball DAIMA
+04: Chatty
+```
+
+Cached episode titles use the same formatting automatically; no cache reset is needed.
 
 Generic chapter labels and timestamp-only chapter names are filtered out. When an episode or chapter title occupies the state line, the optional small-image badge conveys playback state. Cache buffering uses the paused badge/label. Outgoing title, state, and large-image hover text are shortened at UTF-8 boundaries when they exceed 120 bytes.
 
@@ -289,6 +308,8 @@ If a filename resolves to a TV show and contains a season/episode, the script re
 
 The returned `season_number` and `episode_number` must match the requested values.
 
+When an episode title is available, the script also requests `/tv/<show-id>/season/<season>` if the season count is not cached or has expired. The returned season must match the requested season; its episode list supplies the total. A missing or failed season-count lookup leaves the episode number and title visible without `of <season total>`.
+
 If TMDb does not currently have that exact season/episode, the script stops there. It does **not** guess, shift, or map the episode to another season.
 
 Set:
@@ -347,18 +368,27 @@ Episode entries use the resolved TMDb show ID:
 episode:<tmdb show id>:SxxExx:<language>
 ```
 
+Season counts use the resolved TMDb show ID and requested season:
+
+```text
+season-count:<tmdb show id>:Sxx
+```
+
 The persistent cache stores compact data used by Discord, such as:
 
 - TMDb ID/media type
 - official title
 - poster/still URL
 - TMDb page URL
-- episode name when available
+- raw episode name when available; the number and total are added for display
+- episode count for the requested season when available
 
 Other behavior:
 
 - show misses expire after 7 days
 - exact episode 404s expire after 24 hours
+- season counts expire after 24 hours and are refreshed on a subsequent lookup
+- unavailable season counts are cached for one hour before a subsequent lookup retries
 - expired entries are pruned on cache load/save
 - cache size is bounded to 1000 entries
 - writes are deferred briefly to reduce disk churn
@@ -367,7 +397,7 @@ Other behavior:
 - failed replacement retains the complete temporary file and logs its path; on Windows, replacement may require removing the existing file before renaming
 - incomplete searches, including alias-request failures, are not persisted as seven-day misses
 - valid persistent cache hits remain available during HTTP backoff
-- successful entries have no age-based expiry; clear the cache manually when retesting corrected metadata
+- successful show/episode entries have no age-based expiry; clear the cache manually when retesting corrected metadata
 
 Close mpv, delete `discord-mpv-rpc-posters.json`, then restart mpv to force a fresh lookup. Deleting the file while mpv is running does not clear its in-memory entries.
 
@@ -380,7 +410,7 @@ discord-mpv-rpc also keeps bounded process-local caches for reusable data:
 - parsed filenames: up to 256 entries
 - wsrv per-URL status: up to 256 entries
 
-Episode responses and alternate-title raw JSON are not unnecessarily duplicated in the generic TMDb response cache.
+Episode, season-count, and alternate-title lookups retain compact results without duplicating their raw JSON in the generic TMDb response cache.
 
 ## Network/request behavior
 
@@ -396,7 +426,7 @@ TMDb requests are designed to stay conservative during normal playback:
 - request failures prevent an incomplete lookup from being stored as a normal "no result" match
 - backoff suppresses HTTP requests, not reads from the persistent cache
 
-A cached show followed by another uncached episode of the same series will normally need only the exact episode request.
+With the show and a valid season count cached, another uncached episode of the same season normally needs only the exact episode request. A missing or expired season-count entry adds a season-details request when an episode title is available. Cached episode titles may also trigger that count lookup; the title itself does not need to be fetched again.
 
 Discord Rich Presence traffic uses local IPC and is separate from TMDb/wsrv HTTP traffic.
 
@@ -452,6 +482,7 @@ Run mpv from a terminal or enable verbose logging when troubleshooting title mat
 | No TMDb artwork | `tmdb_api_key` is set; `curl` is available on `PATH`; inspect the cleaned-title/TMDb log lines |
 | Wrong movie/show | Inspect `cleaned title=...` and `TMDb selected id=...`; remove the persistent cache when deliberately retesting from a clean state |
 | Correct show but no episode title/still | TMDb may not contain that exact season/episode yet. discord-mpv-rpc intentionally does not remap it to a different season |
+| Episode title appears without `of <season total>` | The season count is unavailable or smaller than the current episode number. Unavailable counts are retried on a subsequent lookup after one hour |
 | Do not want episode lookups | Set `tmdb_episode_lookup=no` |
 | Poster is cropped | Use `poster_fit=contain` |
 | Do not want wsrv.nl | Use `poster_fit=raw` |
