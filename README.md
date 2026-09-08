@@ -1,13 +1,8 @@
 # discord-mpv-rpc
 
 <p align="center">
-  <a href="https://discord.com/">
-    <img src="assets/discord-logo.svg" alt="Discord" width="112">
-  </a>
-  &nbsp;&nbsp;&nbsp;
-  <a href="https://www.themoviedb.org/">
-    <img src="assets/tmdb-logo.svg" alt="TMDb" width="96">
-  </a>
+  <a href="https://discord.com/"><img src="assets/discord-logo.svg" alt="Discord" height="40"></a>&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.themoviedb.org/"><img src="assets/tmdb-logo.svg" alt="TMDb" height="40"></a>
 </p>
 
 Discord Rich Presence for [mpv](https://mpv.io/) with optional movie/TV artwork and episode metadata from [TMDb](https://www.themoviedb.org/).
