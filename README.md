@@ -32,8 +32,8 @@ Presence updates are event-driven. There is no periodic elapsed/remaining-time t
   2. file `metadata/title`
   3. cleaned filename
   4. mpv `media-title`
-- Event-driven Discord updates on file load, pause/resume, seek/playback restart, chapter changes, idle state, and TMDb result arrival
-- Discord progress bar while playing, with timestamps removed while paused so progress does not continue advancing
+- Event-driven Discord updates on file load, pause/resume, buffering, speed/duration changes, seek/playback restart, chapter changes, idle state, and TMDb result arrival
+- Speed-aware Discord progress bar while playing, with timestamps removed while paused or buffering
 - TMDb episode title or meaningful chapter title on the state line when available
 - Optional play / pause / idle small-image assets
 - Optional TMDb movie/TV artwork via asynchronous `curl`
@@ -59,7 +59,9 @@ Presence updates are event-driven. There is no periodic elapsed/remaining-time t
 - [`curl`](https://curl.se/) on `PATH` if using TMDb artwork/metadata
 - Optional: a free [TMDb API key](https://www.themoviedb.org/settings/api)
 
-LuaJIT is recommended. On Unix-like systems without LuaJIT, the fallback Discord IPC transport requires LuaSocket with `socket.unix`.
+LuaJIT is recommended. On Windows, LuaJIT is required for the background IPC reader and disconnect detection. The non-LuaJIT Windows fallback can still send presence, but cannot read incoming messages in the background; disconnects may only be noticed on a later send. The script logs this limitation.
+
+On Unix-like systems without LuaJIT, the fallback Discord IPC transport requires LuaSocket with `socket.unix`; that transport supports background reads.
 
 You do **not** need a Discord bot, OAuth flow, or install link.
 
@@ -87,15 +89,10 @@ Copy `discord-mpv-rpc.conf` to:
 
 If `portable_config` is next to `mpv.exe`:
 
-```text
-<mpv_dir>\
-└── portable_config\
-    ├── scripts\
-    │   └── discord-mpv-rpc\
-    │       └── main.lua
-    └── script-opts\
-        └── discord-mpv-rpc.conf
-```
+| File | Portable installation path |
+|---|---|
+| Script | `<mpv_dir>\portable_config\scripts\discord-mpv-rpc\main.lua` |
+| Config | `<mpv_dir>\portable_config\script-opts\discord-mpv-rpc.conf` |
 
 mpv will auto-load `scripts/discord-mpv-rpc/main.lua`.
 
@@ -132,7 +129,9 @@ Leave `tmdb_api_key=` empty if you only want Discord Rich Presence without TMDb 
 
 ## Configuration
 
-All options live in `script-opts/discord-mpv-rpc.conf`.
+All options live in `script-opts/discord-mpv-rpc.conf`. Edit this file before starting mpv; restart mpv after configuration changes.
+
+`update_interval` has no effect and is not included in the sample configuration. The IPC reader interval and reconnect timing are internal constants, not presence-refresh options.
 
 | Option | Default | Description |
 |---|---|---|
@@ -144,7 +143,7 @@ All options live in `script-opts/discord-mpv-rpc.conf`.
 | `large_image` | `mpv` | Fallback Discord large-image asset key |
 | `large_text` | `mpv` | Hover text for the fallback large image |
 | `small_image_playing` | `play` | Small-image asset while playing |
-| `small_image_paused` | `pause` | Small-image asset while paused |
+| `small_image_paused` | `pause` | Small-image asset while paused or buffering |
 | `small_image_idle` | `mpv` | Small-image asset while idle |
 | `poster_fit` | `contain` | `contain` letterboxes TMDb artwork to a square through wsrv.nl; `raw` sends the original TMDb image URL directly |
 | `enabled` | `yes` | Start with Rich Presence enabled |
@@ -175,35 +174,28 @@ enabled=yes
 
 The Discord title is chosen in this order:
 
-```text
-TMDb official title
-    ↓
-file metadata/title
-    ↓
-cleaned filename
-    ↓
-mpv media-title
-```
+1. TMDb official title
+2. File `metadata/title`
+3. Cleaned filename
+4. mpv `media-title`
 
 The state line uses:
 
-```text
-TMDb episode name
-    ↓
-meaningful chapter title
-    ↓
-Playing / Paused / Idle
-```
+1. TMDb episode name
+2. Meaningful chapter title
+3. Playing / Paused / Idle
 
-Generic chapter labels and timestamp-only chapter names are filtered out.
+Generic chapter labels and timestamp-only chapter names are filtered out. When an episode or chapter title occupies the state line, the optional small-image badge conveys playback state. Cache buffering uses the paused badge/label. Outgoing title, state, and large-image hover text are shortened at UTF-8 boundaries when they exceed 120 bytes.
 
 ### Progress bar
 
-While playing, the script sends Discord `start` and `end` timestamps calculated from mpv's current position and duration. Discord animates the progress bar locally after that.
+While playing, the script sends Discord `start` and `end` timestamps calculated from mpv's current position, duration, and playback speed. Discord animates the progress bar locally after that. At 2× speed, for example, 10 minutes of remaining media correspond to 5 minutes of remaining wall-clock time.
+
+The timestamp calculation is `start = now - position / speed` and `end = now + (duration - position) / speed`, rounded down to whole seconds. This preserves the progress fraction and expected finish time; timestamps represent wall-clock playback time rather than literal media time at non-1× speeds.
 
 There is **no periodic elapsed/remaining-time text update**.
 
-When paused, timestamps are removed so the progress bar does not continue advancing. On resume or seek, the timestamps are recalculated once and sent again.
+When paused or waiting for the playback cache, timestamps are removed so progress does not continue advancing. On resume, buffering completion, seek/playback restart, or speed/duration change, timestamps are recalculated and sent again. Idle playback and media without a known positive duration have no progress timestamps.
 
 ### Event-driven updates
 
@@ -212,13 +204,15 @@ Presence is refreshed only when something meaningful changes, including:
 - file loaded
 - TMDb/poster/episode result arrived
 - pause or resume
+- buffering starts or ends
+- playback speed or duration changes
 - seek / playback restart
 - chapter change when no TMDb episode title is active
 - idle state change
 - Discord reconnect
 - manual enable/disable
 
-Seek/restart events are debounced to avoid unnecessary Discord IPC updates while scrubbing.
+Seek/restart events are debounced to reduce Discord IPC updates while scrubbing. Metadata-only callbacks skip sending when the visible activity is unchanged. Background IPC reads do not periodically republish the activity.
 
 ## Filename parsing
 
@@ -245,12 +239,19 @@ Movie.Name.2026.1080p.BluRay.mkv
 
 Release-group brackets, dots/underscores, year markers, episode markers, and other common filename noise are cleaned before matching.
 
+Examples of parsed filenames:
+
+| Input | Parsed result |
+|---|---|
+| `1984 (2023).mkv` | Title `1984`, year `2023` |
+| `Movie.1080p.WEB-DL.x265.AAC.mkv` | Title `Movie` |
+| `Show.Name.(2026)/Show.S01E02.mkv` | Title `Show`, year `2026`, season 1, episode 2 |
+
+Filename parsing remains heuristic; unusual naming conventions can still need cleanup.
+
 When useful, the script can also inherit title/year context from a parent directory containing a year, for example:
 
-```text
-Show Name (2026)/
-└── Show Name - S01E02.mkv
-```
+`Show Name (2026)/Show Name - S01E02.mkv`
 
 ## TMDb matching
 
@@ -261,8 +262,8 @@ TMDb matching is designed to avoid unnecessary requests while still handling loc
 TV resolution is staged:
 
 1. Search `/search/tv` using the filename-derived title and known year when available.
-2. If needed, broaden the TV search without the year filter.
-3. If directory title context differs from the filename title, search that too.
+2. If the result is not decisive and directory title context differs, search that title using the known year.
+3. If still needed, broaden the TV searches without the year filter.
 4. Use `/search/multi` as an additional candidate source when the earlier stages remain weak/ambiguous.
 5. Only difficult matches fan out into alternate-title requests.
 6. Alternate-title checks are tiered:
@@ -361,10 +362,14 @@ Other behavior:
 - expired entries are pruned on cache load/save
 - cache size is bounded to 1000 entries
 - writes are deferred briefly to reduce disk churn
-- cache replacement uses a temporary file before replacing the main JSON file
-- transient network failures are not persisted as permanent misses
+- cache writes use a process-specific temporary file, `discord-mpv-rpc-posters.json.<pid>.tmp`
+- write, flush, and close must succeed before the temporary file replaces the main JSON file
+- failed replacement retains the complete temporary file and logs its path; on Windows, replacement may require removing the existing file before renaming
+- incomplete searches, including alias-request failures, are not persisted as seven-day misses
+- valid persistent cache hits remain available during HTTP backoff
+- successful entries have no age-based expiry; clear the cache manually when retesting corrected metadata
 
-Delete `discord-mpv-rpc-posters.json` to force a completely fresh persistent lookup.
+Close mpv, delete `discord-mpv-rpc-posters.json`, then restart mpv to force a fresh lookup. Deleting the file while mpv is running does not clear its in-memory entries.
 
 ### In-memory caches
 
@@ -388,7 +393,8 @@ TMDb requests are designed to stay conservative during normal playback:
 - switching files invalidates stale lookup work
 - active stale TMDb `curl` subprocesses are aborted when possible
 - HTTP 429 triggers exponential backoff from 30 seconds up to 5 minutes
-- request failures are not stored as normal "no result" matches
+- request failures prevent an incomplete lookup from being stored as a normal "no result" match
+- backoff suppresses HTTP requests, not reads from the persistent cache
 
 A cached show followed by another uncached episode of the same series will normally need only the exact episode request.
 
@@ -400,14 +406,18 @@ The script communicates directly with the Discord desktop client's IPC socket/na
 
 It includes:
 
-- IPC frame length/opcode validation
-- partial send/receive handling
+- A background reader every 250 ms while connected, on LuaJIT transports and the Unix LuaSocket fallback
+- Nonblocking reads that buffer fragmented headers and payloads
+- Frame length/opcode validation, a 1 MiB payload limit, and a 5-second timeout for incomplete incoming frames
+- Ping/pong handling, close-frame detection, and RPC error logging with the response nonce
 - UTF-8 → UTF-16 handling on Windows
-- reconnect backoff from 1 to 30 seconds
-- a reconnect-only watchdog while Discord is unavailable
-- automatic republishing of the current activity after Discord reconnects
+- Reconnect backoff from 1 to 30 seconds, checked by a one-second watchdog while disconnected
+- Automatic republishing of the current activity after a successful reconnect
+- Explicit JSON `null` when clearing activity; toggling off also closes the connection and stops its reader
 
-The normal presence engine does not use a periodic update timer.
+The normal presence engine does not periodically resend activity. The reader checks incoming local IPC data; the reconnect watchdog only runs while disconnected. These are separate from TMDb/wsrv HTTP requests.
+
+On Windows without LuaJIT, the fallback lacks background reads. Automatic detection during otherwise unchanged playback therefore requires a LuaJIT-enabled mpv build.
 
 ## Usage
 
@@ -435,16 +445,19 @@ Run mpv from a terminal or enable verbose logging when troubleshooting title mat
 |---|---|
 | No Discord status | Discord desktop is running; `client_id` is correct; Activity Privacy is enabled |
 | `handshake not READY` | Verify the Discord Application ID; restart Discord if necessary |
-| Discord was started/restarted after mpv | discord-mpv-rpc should reconnect automatically using the reconnect watchdog/backoff |
+| Discord was started/restarted after mpv | Supported readers detect the disconnect and reconnect automatically; Windows background detection requires LuaJIT |
+| `LuaJIT is required on Windows for background IPC disconnect detection` | Use a LuaJIT-enabled mpv build for background IPC reads |
+| `Discord RPC error (nonce=...)` | Inspect the logged Discord error message; a successful local write alone does not mean Discord accepted the activity |
+| Changing `update_interval` does nothing | This option is ignored; presence is event-driven |
 | No TMDb artwork | `tmdb_api_key` is set; `curl` is available on `PATH`; inspect the cleaned-title/TMDb log lines |
 | Wrong movie/show | Inspect `cleaned title=...` and `TMDb selected id=...`; remove the persistent cache when deliberately retesting from a clean state |
 | Correct show but no episode title/still | TMDb may not contain that exact season/episode yet. discord-mpv-rpc intentionally does not remap it to a different season |
 | Do not want episode lookups | Set `tmdb_episode_lookup=no` |
 | Poster is cropped | Use `poster_fit=contain` |
 | Do not want wsrv.nl | Use `poster_fit=raw` |
-| wsrv is unavailable | The script automatically falls back to the raw TMDb image and retries after the cached failure expires |
+| wsrv is unavailable | The script falls back after a failed probe; a later poster lookup can probe again after the failure TTL expires |
 | TMDb returns 429 | The script automatically backs off; avoid repeatedly deleting the cache during normal use |
-| Old cached result during testing | Delete `discord-mpv-rpc-posters.json` to force a clean persistent lookup |
+| Old cached result during testing | Close mpv, delete `discord-mpv-rpc-posters.json`, and restart so disk and process-local caches are cleared |
 
 ### Test TMDb manually
 
