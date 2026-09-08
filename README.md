@@ -11,6 +11,19 @@ The script publishes the current media title to Discord as **Watching `<title>`*
 
 Presence updates are event-driven. There is no periodic elapsed/remaining-time text refresh; Discord animates the progress bar from the timestamps it already has.
 
+## Preview
+
+<p align="center">
+  <img src="assets/preview-1.png" alt="Discord Rich Presence showing Dragon Ball DAIMA" width="48%">
+  <img src="assets/preview-2.png" alt="Discord Rich Presence showing Labyrinth" width="48%">
+</p>
+
+<p align="center">
+  <em>Examples of discord-mpv-rpc displaying an anime episode and a movie in Discord.</em>
+</p>
+
+> Movie/TV metadata and artwork are provided by TMDb. Discord is a trademark of Discord Inc. This project is not affiliated with or endorsed by Discord or TMDb.
+
 ## Features
 
 - **Watching `<title>`** Rich Presence instead of the Discord Developer Portal application name
