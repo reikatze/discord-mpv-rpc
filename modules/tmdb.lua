@@ -757,15 +757,20 @@ local function tmdb_lookup(
     cache_title = gsub(cache_title, '^%s+', '')
     cache_title = gsub(cache_title, '%s+$', '')
 
+    local index_ids = modules.tmdb_index.candidates(title, is_tv)
     local preferred_type = is_tv and 'tv' or 'movie'
     local key = 'show:' .. preferred_type .. '|' .. cache_title
         .. '|' .. (year or '') .. '|' .. TMDB_LANG
+    -- New index candidates must not inherit a pre-index negative result.
+    if #index_ids > 0 then
+        key = key .. '|export:' .. table.concat(index_ids, ',')
+    end
     local cached = shared.poster_cache[key]
 
     -- Safely migrate positive pre-v5-7 cache entries only when their stored
     -- media type agrees with this lookup. Old negatives are deliberately not
     -- reused because they did not distinguish TV from movie.
-    if cached == nil then
+    if cached == nil and #index_ids == 0 then
         local legacy_key = 'show:' .. cache_title
             .. '|' .. (year or '') .. '|' .. TMDB_LANG
         local legacy_cached = shared.poster_cache[legacy_key]
@@ -855,7 +860,44 @@ local function tmdb_lookup(
             return outcome
         end
 
-        if is_tv then
+        -- Verify every indexed duplicate before taking the shortcut. The
+        -- export has no reliable year/artwork/episode data, so details remain
+        -- authoritative. Errors or ambiguous results use the normal search.
+        if #index_ids > 0 then
+            local verified, complete = {}, true
+            for _, id in ipairs(index_ids) do
+                if cancelled() then return nil end
+                local url = format(
+                    'https://api.themoviedb.org/3/%s/%d?api_key=%s&language=%s',
+                    preferred_type, id, TMDB_KEY, url_encode(TMDB_LANG))
+                local data, outcome = tmdb_get_json_cached(url, lookup_token)
+                if outcome == 'cancelled' then return nil end
+                if outcome == 'ok' and type(data) == 'table'
+                    and tonumber(data.id) == id
+                    and type(is_tv and data.name or data.title) == 'string' then
+                    if not data.adult and not data.video
+                        and (not year or tmdb_result_year(data) == tostring(year)) then
+                        data.media_type = preferred_type
+                        verified[#verified + 1] = data
+                    end
+                elseif outcome ~= 'not_found' then
+                    complete = false
+                end
+            end
+            -- Require a single verified work and an exact title match. Never
+            -- use popularity to pick among remakes sharing the same name.
+            if complete and #verified == 1 then
+                local item = verified[1]
+                if modules.tmdb_index.matches(title, item.title or item.name)
+                    or modules.tmdb_index.matches(title, item.original_title or item.original_name) then
+                    tmdb_add_candidates(pool, seen, verified, preferred_type, 'local-export')
+                    any_request_ok = true
+                    score_primary(true)
+                end
+            end
+        end
+
+        if is_tv and not confident then
             -- Stage 1: one dedicated TV search using the strongest context.
             -- Straightforward shows such as Dragon Ball DAIMA can stop here.
             local outcome = add_tv_query(
@@ -903,7 +945,7 @@ local function tmdb_lookup(
                     score_primary(true)
                 end
             end
-        else
+        elseif not confident then
             -- Movies continue to use one multi-search first.
             local results, outcome =
                 tmdb_search_multi_candidates(title, lookup_token)

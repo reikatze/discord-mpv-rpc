@@ -22,6 +22,9 @@ local o = {
     enabled         = true,
     poster_fit      = 'contain',
     tmdb_episode_lookup = true,
+    tmdb_local_index = true,
+    key_toggle_db = 'Ctrl+d',
+    tmdb_index_mpv_path = '',
 }
 opts.read_options(o, 'discord-mpv-rpc')
 
@@ -62,6 +65,9 @@ return {
     TMDB_EPISODE_LOOKUP = TMDB_EPISODE_LOOKUP,
     TMDB_KEY = TMDB_KEY,
     TMDB_LANG = TMDB_LANG,
+    TMDB_LOCAL_INDEX = o.tmdb_local_index ~= false,
+    KEY_TOGGLE_DB = o.key_toggle_db,
+    TMDB_INDEX_MPV_PATH = o.tmdb_index_mpv_path,
     msg = msg,
     utils = utils,
 }

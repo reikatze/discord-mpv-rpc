@@ -127,24 +127,16 @@ end
 
 -- Match tags on a lowercase copy, retaining the original title's spelling.
 -- Keep matching at release boundaries so words inside real titles survive.
-local release_suffixes = {
-    'web[%.%s%-]?dl', 'webrip', 'blu[%.%s%-]?ray', 'b[dr]rip',
-    'hdrip', 'dvdrip', 'hdtv', 'amzn', 'nf', 'dsnp', 'hmax',
-    'proper', 'repack', 'remux', '[xh][%.%s%-]?26[45]', 'hevc', 'avc',
-    'av1', 'aac', 'e[%.%s%-]?ac3', 'ac3', 'dts[%.%s%-]?hd', 'dts',
-    'truehd', 'ddp%d*', 'atmos', 'flac', 'opus', 'mp3',
-    '[257][%. ]1', '[257][%. ]1[%. ]%d',
-    '480[pi]', '576[pi]', '720[pi]', '1080[pi]', '2160[pi]', '4320[pi]',
-    '[248]k', '10[%.%s%-]?bit', '8[%.%s%-]?bit', '12[%.%s%-]?bit',
-    'hdr10%+?', 'hdr', 'sdr', 'judas', 'subsplease', 'horriblesubs',
-}
+local release_suffixes = modules.database.parsing.release_suffixes
+local release_groups = modules.database.parsing.release_groups
 
 local function strip_filename_release_tags(name)
     name = gsub(name, '%b[]', ' ')
     -- Unbracketed group prefixes require a dash, avoiding damage to titles
     -- such as "Judas and the Black Messiah".
-    for _, group in ipairs({'judas', 'subsplease', 'horriblesubs'}) do
-        local _, last = name:lower():find('^%s*' .. group .. '%s*%-%s*')
+    for _, group in ipairs(release_groups) do
+        local escaped = group:lower():gsub('([^%w])', '%%%1')
+        local _, last = name:lower():find('^%s*' .. escaped .. '%s*%-%s*')
         if last then name = sub(name, last + 1) end
     end
 
