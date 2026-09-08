@@ -556,13 +556,7 @@ If that fails outside mpv, check your TMDb key, network access, and `curl` insta
 - Title matching is cached, so later episodes of the same show normally avoid repeating the full search process.
 - The Discord progress bar is driven by timestamps; the script does not display elapsed/remaining time text.
 
-## License
-
-[MIT](https://opensource.org/licenses/MIT)
-
 ## Optional local TMDb export index
-
-The included snapshot is dated **2026-09-07** and contains **1,017,532 movie** and **219,456 TV title keys**. It is checked automatically before use.
 
 The optional index uses [TMDb daily movie and TV exports](https://developer.themoviedb.org/docs/daily-id-exports).
 It indexes the available original titles and preserves duplicate IDs. It is not
@@ -677,3 +671,7 @@ release group prefixes. Tables are loaded once; restart mpv after editing.
 `release_groups` contains literal names recognized at the start only when
 followed by a dash. Bracketed tags and season/episode extraction remain in
 `modules/filename.lua`. Preserve valid Lua syntax when editing.
+
+## License
+
+[MIT](https://opensource.org/licenses/MIT)
