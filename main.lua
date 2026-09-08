@@ -23,8 +23,10 @@ local utils = require 'mp.utils'
 local msg   = require 'mp.msg'
 local opts  = require 'mp.options'
 
+local DEFAULT_CLIENT_ID = '1546134074882789446'
+
 local o = {
-    client_id       = '',
+    client_id       = DEFAULT_CLIENT_ID,
     large_image          = 'mpv',
     large_text           = 'mpv',
     small_image_playing  = 'play',
@@ -40,8 +42,7 @@ local o = {
 opts.read_options(o, 'discord-mpv-rpc')
 
 if o.client_id == '' then
-    msg.error('discord-mpv-rpc: set client_id in script-opts/discord-mpv-rpc.conf')
-    return
+    o.client_id = DEFAULT_CLIENT_ID
 end
 
 ----------------------------------------------------------------

@@ -56,7 +56,6 @@ Presence updates are event-driven. There is no periodic elapsed/remaining-time t
 
 - [mpv](https://mpv.io/)
 - Discord desktop app running
-- Your own Discord application ID
 - [`curl`](https://curl.se/) on `PATH` if using TMDb artwork/metadata
 - Optional: a free [TMDb API key](https://www.themoviedb.org/settings/api)
 
@@ -99,17 +98,20 @@ mpv will auto-load `scripts/discord-mpv-rpc/main.lua`.
 
 ## Discord application setup
 
+The script uses the built-in Application ID `1546134074882789446` by default. Leave `client_id=` empty or omit it to use this default; creating your own Discord application is optional.
+
+In Discord, enable **Settings → Activity Privacy → Display current activity as a status message**.
+
+### Optional custom Application ID
+
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications).
 2. Create a **New Application**.
 3. Open **General Information** and copy the **Application ID**.
-4. Put that value in `client_id=` in `discord-mpv-rpc.conf`.
-5. In Discord, enable **Settings → Activity Privacy → Display current activity as a status message**.
-
-Do not reuse an Application ID from this repository, another person, or a screenshot. Each user should create their own application.
+4. Set `client_id=YOUR_APPLICATION_ID` in `discord-mpv-rpc.conf` and restart mpv.
 
 ### Optional Discord art assets
 
-Under your Discord application's **Rich Presence → Art Assets**, you can upload square images matching the configured fallback/small-image keys:
+If you use a custom Application ID, under your Discord application's **Rich Presence → Art Assets**, you can upload square images matching the configured fallback/small-image keys:
 
 - `mpv`
 - `play`
@@ -136,7 +138,7 @@ All options live in `script-opts/discord-mpv-rpc.conf`. Edit this file before st
 
 | Option | Default | Description |
 |---|---|---|
-| `client_id` | *(required)* | Your Discord application ID |
+| `client_id` | `1546134074882789446` | Discord Application ID. Empty or omitted uses the built-in default; set a custom ID to override |
 | `tmdb_api_key` | empty | TMDb API key. Leave empty to disable TMDb lookups |
 | `tmdb_language` | `en-US` | TMDb language used for searches and metadata |
 | `tmdb_episode_lookup` | `yes` | Look up exact TMDb TV episode titles/stills and season totals when season/episode information is parsed |
@@ -152,7 +154,7 @@ All options live in `script-opts/discord-mpv-rpc.conf`. Edit this file before st
 Example:
 
 ```ini
-client_id=123456789012345678
+client_id=
 tmdb_api_key=your_tmdb_key_here
 tmdb_language=en-US
 tmdb_episode_lookup=yes
