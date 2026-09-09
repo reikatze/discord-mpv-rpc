@@ -31,6 +31,18 @@ return function(utils)
         end
         return m
     end
+    function M.state(root)
+        local f=io.open(root..'health.json','rb')
+        if not f then return nil end
+        local raw=f:read(4097);f:close()
+        if not raw or #raw>4096 then return nil end
+        local ok,state=pcall(utils.parse_json,raw)
+        if not ok or type(state)~='table' or type(state.generation)~='string'
+            or type(state.valid)~='boolean' or type(state.checked_at)~='number' then
+            return nil
+        end
+        return state
+    end
     function M.stale(m) return os.time()-m.exported_at>=7*86400 end
     function M.sizes(root,m)
         for _,media in ipairs({'movie','tv'}) do

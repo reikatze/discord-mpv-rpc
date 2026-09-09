@@ -12,7 +12,8 @@ local log_warn = modules.helpers.log_warn
 local parse_json = modules.helpers.parse_json
 local time = modules.helpers.time
 
-local CACHE_PATH = SCRIPT_DIR .. PATH_SEP .. 'discord-mpv-rpc-posters.json'
+local CACHE_PATH = modules.config.CACHE_PATH
+    or (SCRIPT_DIR .. PATH_SEP .. 'discord-mpv-rpc-posters.json')
 
 shared.poster_cache = {}
 local poster_cache_loaded = false
@@ -73,6 +74,13 @@ local function load_poster_cache()
         shared.poster_cache = data
         prune_poster_cache_expired()
         log_verbose('loaded poster cache from ' .. CACHE_PATH)
+    else
+        local corrupt_path = CACHE_PATH .. '.corrupt-' .. tostring(time())
+        if os.rename(CACHE_PATH, corrupt_path) then
+            log_warn('invalid poster cache moved to ' .. corrupt_path)
+        else
+            log_warn('invalid poster cache ignored: ' .. CACHE_PATH)
+        end
     end
 end
 

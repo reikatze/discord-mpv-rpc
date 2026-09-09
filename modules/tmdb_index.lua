@@ -51,15 +51,17 @@ return function(modules, shared)
             return nil
         end
         local verified=false
-        local f=io.open(root..'health.json','rb')
-        if f then
-            local raw=f:read(4096);f:close()
-            local ok,state=pcall(parse_json,raw or '')
-            if ok and type(state)=='table' and state.generation==value.generation and state.valid==false then
-                bad_generation=value.generation
-            elseif ok and type(state)=='table' and state.generation==value.generation and state.valid==true then
-                verified=true
-            end
+        local state=health.state(root)
+        if state and state.generation==value.generation and state.valid==false then
+            bad_generation=value.generation
+        elseif state and state.generation==value.generation and state.valid==true then
+            verified=true
+        elseif type(value.integrity)=='table' then
+            -- A packaged index can be used immediately after cheap structural
+            -- checks. The worker verifies its full fingerprints in parallel,
+            -- while every lookup still validates the exact record it reads.
+            verified=true
+            launch()
         end
         if value.generation==bad_generation then manifest=nil;launch();return nil end
         if not verified then manifest=nil;launch();return nil end
@@ -136,6 +138,11 @@ return function(modules, shared)
         enabled=not enabled
         manifest=nil;next_read=0
         if enabled then next_launch=0;launch() end
+        mp.add_timeout(0,function()
+            if modules.metadata and mp.get_property('path') then
+                modules.metadata.lookup_poster()
+            end
+        end)
         mp.osd_message('TMDb local DB: '..(enabled and 'on' or 'off'))
     end
     if modules.config.KEY_TOGGLE_DB and modules.config.KEY_TOGGLE_DB~='' then

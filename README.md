@@ -88,6 +88,8 @@ With a custom application, optionally upload square Rich Presence assets named `
 | `tmdb_episode_lookup` | `yes` | Looks up the exact parsed season and episode |
 | `tmdb_local_index` | `yes` | Enables the local TMDb index and automatic maintenance |
 | `tmdb_index_mpv_path` | empty | Optional path to a LuaJIT-enabled mpv for the index worker |
+| `tmdb_positive_cache_days` | `60` | Days before successful TMDb metadata is refreshed |
+| `cache_path` | empty | Persistent metadata-cache path; empty uses mpv's configuration directory |
 | `key_toggle` | `D` | Toggles Rich Presence for the current session |
 | `key_toggle_db` | `Ctrl+d` | Toggles local-index lookup for the current session |
 | `large_image` | `mpv` | Fallback large-image asset key |
@@ -141,13 +143,13 @@ Parsing is heuristic. For a bad match, check the cleaned-title log entry and sim
 
 The bundled index is built from [TMDb daily ID exports](https://developer.themoviedb.org/docs/daily-id-exports). It helps resolve exact movie and TV titles locally before falling back to the normal online TMDb search. A TMDb API key is still required to retrieve metadata and artwork.
 
-When `tmdb_local_index=yes`, a detached mpv worker checks the index at startup and hourly. It downloads and rebuilds only when the index is:
+When `tmdb_local_index=yes`, a detached mpv worker performs quick index checks at startup and hourly. Full checksums are limited to once per day unless corruption is detected. It downloads and rebuilds only when the index is:
 
 - missing
 - corrupted
 - at least seven days old
 
-The updater is pure Lua and uses mpv, LuaJIT, and the existing `curl` executable; no Python, database engine, or unzip tool is required. Playback, cached results, and online TMDb searches continue while maintenance runs. Completed indexes are picked up automatically.
+The updater is pure Lua and uses mpv, LuaJIT, and the existing `curl` executable; no Python, database engine, or unzip tool is required. Playback, cached results, and online TMDb searches continue while maintenance runs. Completed indexes are picked up automatically. Downloaded exports and inactive index generations are removed after successful validation.
 
 Set `tmdb_local_index=no` to disable both lookup and automatic maintenance. `Ctrl+D` toggles them for the current session without rewriting the configuration; it does not stop a worker already running.
 
@@ -163,7 +165,7 @@ Generated index files stay in `db/tmdb/`.
 
 ## Cache and network use
 
-Metadata is cached in `discord-mpv-rpc-posters.json` beside `main.lua`. Close mpv and delete this file when you intentionally want to retest matching from a clean cache.
+Metadata is cached in `discord-mpv-rpc-posters.json` in mpv's configuration directory by default. Set `cache_path` to override it. Successful metadata is refreshed periodically according to `tmdb_positive_cache_days`; missing results use shorter retry windows. Close mpv and delete the cache file when you intentionally want to retest matching from a clean cache.
 
 TMDb requests are paced, coalesced, cached, cancelled when stale, and backed off after HTTP 429 responses. The local index does bounded disk lookups rather than loading the full database into memory during playback.
 
@@ -184,6 +186,14 @@ With `poster_fit=contain`, the TMDb image URL is sent to [wsrv.nl](https://wsrv.
 | Local index does not build | Use LuaJIT-enabled mpv, verify `curl`, and make the script directory writable |
 
 Run mpv from a terminal or enable verbose logging for more detail.
+
+## Tests
+
+Run the pure-Lua checks from the installed script directory:
+
+```sh
+lua tests/run.lua
+```
 
 ## Credits
 

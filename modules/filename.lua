@@ -157,7 +157,9 @@ end
 
 local function normalize_filename_title(title)
     title = strip_filename_release_tags(title)
-    title = gsub(title, '%b()', ' ')
+    -- Keep meaningful parenthetical title text. Years are removed by
+    -- derive_title()/directory_context(), and recognized technical tags are
+    -- already handled by strip_filename_release_tags().
     title = gsub(title, '[%.%_]', ' ')
     title = strip_filename_release_tags(title)
     title = gsub(title, '^%s*%-%s*', '')

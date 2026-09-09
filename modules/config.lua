@@ -25,6 +25,8 @@ local o = {
     tmdb_local_index = true,
     key_toggle_db = 'Ctrl+d',
     tmdb_index_mpv_path = '',
+    cache_path      = '',
+    tmdb_positive_cache_days = 60,
 }
 opts.read_options(o, 'discord-mpv-rpc')
 
@@ -48,6 +50,19 @@ local POSTER_FIT   = o.poster_fit or 'contain'
 local PID          = utils.getpid()
 local IS_WINDOWS   = package.config:sub(1, 1) == '\\'
 local PATH_SEP     = package.config:sub(1, 1)
+local cache_path = o.cache_path
+if not cache_path or cache_path == '' then
+    cache_path = '~~/discord-mpv-rpc-posters.json'
+end
+local expanded_cache_path = nil
+do
+    local ok, value = pcall(mp.command_native, {'expand-path', cache_path})
+    if ok and type(value) == 'string' and value ~= '' then
+        expanded_cache_path = value
+    end
+end
+local positive_cache_days = tonumber(o.tmdb_positive_cache_days) or 60
+positive_cache_days = math.max(1, math.min(positive_cache_days, 3650))
 
 return {
     ACTIVITY_WATCHING = ACTIVITY_WATCHING,
@@ -68,6 +83,8 @@ return {
     TMDB_LOCAL_INDEX = o.tmdb_local_index ~= false,
     KEY_TOGGLE_DB = o.key_toggle_db,
     TMDB_INDEX_MPV_PATH = o.tmdb_index_mpv_path,
+    CACHE_PATH = expanded_cache_path,
+    TMDB_POSITIVE_CACHE_TTL = positive_cache_days * 24 * 60 * 60,
     msg = msg,
     utils = utils,
 }

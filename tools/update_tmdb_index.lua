@@ -9,6 +9,42 @@ if not tools_dir or tools_dir=='' then
 end
 local root=tools_dir..'/../db/tmdb/'
 local function log(s) mp.msg.info('TMDb index: '..s) end
+local FULL_CHECK_INTERVAL=24*60*60
+
+local function valid_generation(name)
+    return type(name)=='string' and #name==33 and name:match('^g%x+$')~=nil
+end
+
+local function remove_tree(path)
+    local entries=utils.readdir(path,'all')
+    if entries then
+        for _,name in ipairs(entries) do remove_tree(path..'/'..name) end
+    end
+    os.remove(path)
+end
+
+local function cleanup_generations(meta)
+    local active=meta.generation
+    for _,name in ipairs(utils.readdir(root,'all') or {}) do
+        if valid_generation(name) then
+            if name~=active then remove_tree(root..name) end
+        else
+            local generation=name:match('^(g%x+)%-')
+            if valid_generation(generation) then
+                if generation~=active or name:match('%.json%.gz$') then
+                    os.remove(root..name)
+                end
+            end
+        end
+    end
+    if meta.layout~='flat' then
+        local active_dir=root..active..'/'
+        for _,name in ipairs(utils.readdir(active_dir,'files') or {}) do
+            if name:match('%.json%.gz$') then os.remove(active_dir..name) end
+        end
+    end
+    os.remove(root..'current.json.bak')
+end
 
 local function run()
     local deflate=assert(loadfile(tools_dir..'/vendor/LibDeflate.lua'))()
@@ -59,6 +95,7 @@ local function run()
             local base=root..generation..'-'..media
             owned[#owned+1]=base..'.jsonl';owned[#owned+1]=base..'.offsets'
             counts[media]=build(target,base,media,log);sources[media]=url
+            os.remove(target)
             log(media..': '..counts[media]..' title keys')
             collectgarbage('collect')
         end
@@ -103,10 +140,29 @@ local function maintain()
     local ok,err=pcall(function()
         local health=assert(loadfile(tools_dir..'/index_health.lua'))()(utils)
         local meta=health.load(root)
-        local checked,valid=pcall(function() return meta and health.valid(root,meta) end)
-        valid=checked and valid or false
-        save('health.json',{generation=meta and meta.generation or '',valid=valid,checked_at=os.time()})
+        local now=os.time()
+        local valid=false
+        local sizes_ok=meta and health.sizes(root,meta) or false
+        if sizes_ok and health.stale(meta) then
+            -- The stale generation will be replaced and is no longer used by
+            -- playback, so a full checksum here would only delay the update.
+            valid=true
+        elseif sizes_ok then
+            local state=health.state(root)
+            local recent=state and state.generation==meta.generation and state.valid
+                and state.checked_at<=now+300 and now-state.checked_at<FULL_CHECK_INTERVAL
+            if recent then
+                valid=true
+            else
+                local checked,result=pcall(health.valid,root,meta)
+                valid=checked and result or false
+                save('health.json',{generation=meta.generation,valid=valid,checked_at=now})
+            end
+        elseif meta then
+            save('health.json',{generation=meta.generation,valid=false,checked_at=now})
+        end
         if valid and not health.stale(meta) then
+            cleanup_generations(meta)
             log('Index is healthy and less than one week old; no download or build.')
             return
         end
@@ -124,6 +180,7 @@ local function maintain()
         local current=assert(health.load(root))
         save('health.json',{generation=current.generation,valid=true,checked_at=os.time()})
         os.remove(root..'attempt.json')
+        cleanup_generations(current)
     end)
     unlock()
     assert(ok,err)

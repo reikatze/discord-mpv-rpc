@@ -27,7 +27,8 @@ return function(json,gunzip)
         local success,result=pcall(function()
             local input=open(source,'rb');local raw=assert(input:read('*a'));input:close()
             log('Decompressing '..media..' export (Lua)')
-            local text=gunzip(raw);raw=nil;collectgarbage('collect')
+            local holder={data=raw};raw=nil
+            local text=gunzip(holder);collectgarbage('collect')
             local runs,batch={},{}
             local function flush()
                 table.sort(batch,less)

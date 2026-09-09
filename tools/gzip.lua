@@ -33,7 +33,11 @@ return function(deflate)
         assert(d,'truncated gzip trailer')
         return a+b*256+c*65536+d*16777216
     end
-    return function(raw)
+    return function(source)
+        local holder = type(source)=='table' and source or nil
+        local raw = holder and holder.data or source
+        if holder then holder.data=nil end
+        assert(type(raw)=='string','gzip input must be a string')
         assert(#raw>=18 and raw:sub(1,3)=='\031\139\008','invalid gzip header')
         local flags=raw:byte(4)
         assert(flags<32,'reserved gzip flags')
@@ -54,10 +58,15 @@ return function(deflate)
             p=p+2
         end
         assert(p<=#raw-8,'truncated gzip body')
-        local text,remaining=deflate:DecompressDeflate(raw:sub(p,#raw-8))
+        local expected_size=u32(raw,#raw-3)
+        local expected_crc=u32(raw,#raw-7)
+        local compressed=raw:sub(p,#raw-8)
+        raw=nil;collectgarbage('collect')
+        local text,remaining=deflate:DecompressDeflate(compressed)
+        compressed=nil;collectgarbage('collect')
         assert(text and remaining==0,'invalid DEFLATE data or unsupported concatenated gzip members')
-        assert(#text%4294967296==u32(raw,#raw-3),'gzip size mismatch')
-        assert(crc32(text)==u32(raw,#raw-7),'gzip CRC mismatch')
+        assert(#text%4294967296==expected_size,'gzip size mismatch')
+        assert(crc32(text)==expected_crc,'gzip CRC mismatch')
         return text
     end
 end

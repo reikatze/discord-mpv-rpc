@@ -9,6 +9,7 @@ local schedule_poster_cache_save = modules.cache.schedule_poster_cache_save
 local TMDB_EPISODE_LOOKUP = modules.config.TMDB_EPISODE_LOOKUP
 local TMDB_KEY = modules.config.TMDB_KEY
 local TMDB_LANG = modules.config.TMDB_LANG
+local TMDB_POSITIVE_CACHE_TTL = modules.config.TMDB_POSITIVE_CACHE_TTL
 local format = modules.helpers.format
 local gsub = modules.helpers.gsub
 local log_info = modules.helpers.log_info
@@ -767,6 +768,13 @@ local function tmdb_lookup(
     end
     local cached = shared.poster_cache[key]
 
+    if type(cached) == 'table' and persistent_entry_expired(cached) then
+        shared.poster_cache[key] = nil
+        shared.poster_cache_dirty = true
+        schedule_poster_cache_save()
+        cached = nil
+    end
+
     -- Safely migrate positive pre-v5-7 cache entries only when their stored
     -- media type agrees with this lookup. Old negatives are deliberately not
     -- reused because they did not distinguish TV from movie.
@@ -860,10 +868,10 @@ local function tmdb_lookup(
             return outcome
         end
 
-        -- Verify every indexed duplicate before taking the shortcut. The
+        -- Verify a unique indexed title before taking the shortcut. The
         -- export has no reliable year/artwork/episode data, so details remain
-        -- authoritative. Errors or ambiguous results use the normal search.
-        if #index_ids > 0 then
+        -- authoritative. Duplicate titles use the normal search instead.
+        if #index_ids == 1 then
             local verified, complete = {}, true
             for _, id in ipairs(index_ids) do
                 if cancelled() then return nil end
@@ -884,8 +892,9 @@ local function tmdb_lookup(
                     complete = false
                 end
             end
-            -- Require a single verified work and an exact title match. Never
-            -- use popularity to pick among remakes sharing the same name.
+            -- The local shortcut is intentionally limited to unique titles.
+            -- Duplicate titles are cheaper to resolve with one year-filtered
+            -- search than with several individual detail requests.
             if complete and #verified == 1 then
                 local item = verified[1]
                 if modules.tmdb_index.matches(title, item.title or item.name)
@@ -1028,6 +1037,7 @@ local function tmdb_lookup(
             type    = best.media_type,
             id      = best.id,
             episode = nil,
+            expires_at = time() + TMDB_POSITIVE_CACHE_TTL,
         }
 
         remember_poster(key, hit)
@@ -1036,6 +1046,10 @@ local function tmdb_lookup(
             log_info('title  -> ' .. hit.title)
         end
     else
+        if type(cached) == 'table' and not cached.expires_at then
+            cached.expires_at = time() + TMDB_POSITIVE_CACHE_TTL
+            remember_poster(key, cached)
+        end
         log_verbose(format(
             'poster cache hit -> %s (TMDb id=%s)',
             tostring(hit.poster), tostring(hit.id)
@@ -1050,6 +1064,14 @@ local function tmdb_lookup(
         local episode_key = tmdb_episode_persistent_key(hit.id, season, ep)
         local episode_cached = shared.poster_cache[episode_key]
 
+        if type(episode_cached) == 'table'
+            and persistent_entry_expired(episode_cached) then
+            shared.poster_cache[episode_key] = nil
+            shared.poster_cache_dirty = true
+            schedule_poster_cache_save()
+            episode_cached = nil
+        end
+
         if type(episode_cached) == 'table' and episode_cached.negative then
             if not persistent_entry_expired(episode_cached) then
                 log_verbose('episode poster cache hit (no result)')
@@ -1063,6 +1085,10 @@ local function tmdb_lookup(
 
         local episode_hit = unpack_cache_entry(episode_cached)
         if episode_hit then
+            if type(episode_cached) == 'table' and not episode_cached.expires_at then
+                episode_cached.expires_at = time() + TMDB_POSITIVE_CACHE_TTL
+                remember_poster(episode_key, episode_cached)
+            end
             hit = episode_hit
             log_verbose('episode poster cache hit -> ' .. hit.poster)
         else
@@ -1090,6 +1116,7 @@ local function tmdb_lookup(
                     type = hit.type,
                     id = hit.id,
                     episode = nil,
+                    expires_at = time() + TMDB_POSITIVE_CACHE_TTL,
                 }
 
                 if epdata.still_path and #epdata.still_path > 0 then
@@ -1142,5 +1169,9 @@ end
 
 return {
     tmdb_lookup = tmdb_lookup,
+    _test = {
+        format_episode_title = format_episode_title,
+        title_similarity = title_similarity,
+    },
 }
 end

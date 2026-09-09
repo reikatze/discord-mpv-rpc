@@ -85,8 +85,19 @@ local function ipc_paths()
 end
 
 if ffi and RPC.unix then
-    ffi.cdef[[
+    local IS_OSX = ffi.os == 'OSX'
+    if IS_OSX then
+        ffi.cdef[[
+        struct sockaddr_un { unsigned char sun_len; unsigned char sun_family; char sun_path[104]; };
+        int poll(struct pollfd*, unsigned int, int);
+        ]]
+    else
+        ffi.cdef[[
         struct sockaddr_un { unsigned short sun_family; char sun_path[108]; };
+        int poll(struct pollfd*, unsigned long, int);
+        ]]
+    end
+    ffi.cdef[[
         int socket(int, int, int);
         int connect(int, const void*, unsigned);
         int send(int, const void*, size_t, int);
@@ -94,33 +105,44 @@ if ffi and RPC.unix then
         int close(int);
         int fcntl(int, int, int);
         struct pollfd { int fd; short events; short revents; };
-        int poll(struct pollfd*, unsigned long, int);
     ]]
     local C = ffi.C
     local sockaddr_un_t = ffi.typeof('struct sockaddr_un')
     local RECV_SIZE = 4096
     local recv_buf = ffi.new('char[?]', RECV_SIZE)
-    local O_NONBLOCK = 0x800
+    local SUN_PATH_MAX = IS_OSX and 104 or 108
+    local O_NONBLOCK = IS_OSX and 0x4 or 0x800
     local F_GETFL, F_SETFL = 3, 4
 
     function RPC:connect()
         local paths = ipc_paths()
         for i = 1, #paths do
-            local fd = C.socket(1, 1, 0)
-            if fd ~= -1 then
-                local addr = sockaddr_un_t()
-                addr.sun_family = 1
-                ffi.copy(addr.sun_path, paths[i])
-                if C.connect(fd, addr, ffi.sizeof(addr)) == 0 then
-                    pcall(function()
-                        local fl = C.fcntl(fd, F_GETFL, 0)
-                        C.fcntl(fd, F_SETFL, fl + O_NONBLOCK)
-                    end)
-                    self.socket = fd
-                    log_verbose('connected ' .. paths[i])
-                    return true
+            if #paths[i] >= SUN_PATH_MAX then
+                log_verbose('Discord IPC path is too long: ' .. paths[i])
+            else
+                local fd = C.socket(1, 1, 0)
+                if fd ~= -1 then
+                    local addr = sockaddr_un_t()
+                    addr.sun_family = 1
+                    ffi.copy(addr.sun_path, paths[i], #paths[i])
+                    local addr_len = ffi.sizeof(addr)
+                    if IS_OSX then
+                        addr_len = 2 + #paths[i] + 1
+                        addr.sun_len = addr_len
+                    end
+                    if C.connect(fd, addr, addr_len) == 0 then
+                        pcall(function()
+                            local fl = C.fcntl(fd, F_GETFL, 0)
+                            if fl >= 0 then
+                                C.fcntl(fd, F_SETFL, bit.bor(fl, O_NONBLOCK))
+                            end
+                        end)
+                        self.socket = fd
+                        log_verbose('connected ' .. paths[i])
+                        return true
+                    end
+                    C.close(fd)
                 end
-                C.close(fd)
             end
         end
         return false

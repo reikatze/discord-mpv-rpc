@@ -81,9 +81,10 @@ end
 
 RPC.on_disconnect = start_reconnect_watchdog
 
-local function playback_state_label(idle, pause)
+local function playback_state_label(idle, paused, buffering)
     if idle then return 'Idle' end
-    if pause then return 'Paused' end
+    if buffering then return 'Buffering' end
+    if paused then return 'Paused' end
     return 'Playing'
 end
 
@@ -94,11 +95,14 @@ shared.tick = function(force)
     local title = shared.current_tmdb_title or tagged_title() or shared.current_clean_title or raw_title
     title = truncate_utf8(title, 120)
 
-    local pause = get_property_bool('pause') or get_property_bool('paused-for-cache')
+    local paused = get_property_bool('pause')
+    local buffering = get_property_bool('paused-for-cache')
+    local pause = paused or buffering
     local idle  = get_property_bool('idle-active')
     local extra = shared.current_episode or meaningful_chapter_title()
     local state = truncate_utf8(
-        (extra and extra ~= '') and extra or playback_state_label(idle, pause), 120)
+        (extra and extra ~= '') and extra
+            or playback_state_label(idle, paused, buffering), 120)
 
     local large_image = presence_image(shared.current_poster)
     local large_text = truncate_utf8(shared.current_poster and title or FALLBACK_TXT, 120)
@@ -107,7 +111,7 @@ shared.tick = function(force)
     if idle then
         small_image, small_text = SMALL_IDLE, 'Idle'
     elseif pause then
-        small_image, small_text = SMALL_PAUSE, 'Paused'
+        small_image, small_text = SMALL_PAUSE, buffering and 'Buffering' or 'Paused'
     else
         small_image, small_text = SMALL_PLAY, 'Playing'
     end
@@ -116,6 +120,7 @@ shared.tick = function(force)
         title,
         state,
         tostring(pause),
+        tostring(buffering),
         tostring(idle),
         tostring(shared.current_poster or ''),
         tostring(shared.current_tmdb_title or ''),
