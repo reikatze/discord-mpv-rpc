@@ -89,7 +89,7 @@ With a custom application, optionally upload square Rich Presence assets named `
 | `tmdb_local_index` | `yes` | Enables the local TMDb index and automatic maintenance |
 | `tmdb_index_mpv_path` | empty | Optional path to a LuaJIT-enabled mpv for the index worker |
 | `tmdb_positive_cache_days` | `60` | Days before successful TMDb metadata is refreshed |
-| `cache_path` | empty | Persistent metadata-cache path; empty uses mpv's configuration directory |
+| `cache_path` | empty | Persistent metadata-cache path; empty stores it beside `main.lua` |
 | `key_toggle` | `D` | Toggles Rich Presence for the current session |
 | `key_toggle_db` | `Ctrl+d` | Toggles local-index lookup for the current session |
 | `large_image` | `mpv` | Fallback large-image asset key |
@@ -165,7 +165,7 @@ Generated index files stay in `db/tmdb/`.
 
 ## Cache and network use
 
-Metadata is cached in `discord-mpv-rpc-posters.json` in mpv's configuration directory by default. Set `cache_path` to override it. Successful metadata is refreshed periodically according to `tmdb_positive_cache_days`; missing results use shorter retry windows. Close mpv and delete the cache file when you intentionally want to retest matching from a clean cache.
+Metadata is cached in `discord-mpv-rpc-posters.json` beside `main.lua` in the script directory by default. Set `cache_path` to override it; mpv path prefixes such as `~~/` are supported. Successful metadata is refreshed periodically according to `tmdb_positive_cache_days`; missing results use shorter retry windows. Close mpv and delete the cache file when you intentionally want to retest matching from a clean cache.
 
 TMDb requests are paced, coalesced, cached, cancelled when stale, and backed off after HTTP 429 responses. The local index does bounded disk lookups rather than loading the full database into memory during playback.
 
