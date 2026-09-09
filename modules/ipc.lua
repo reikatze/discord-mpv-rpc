@@ -107,6 +107,7 @@ if ffi and RPC.unix then
         struct pollfd { int fd; short events; short revents; };
     ]]
     local C = ffi.C
+    local const_byte_ptr = ffi.typeof('const uint8_t*')
     local sockaddr_un_t = ffi.typeof('struct sockaddr_un')
     local RECV_SIZE = 4096
     local recv_buf = ffi.new('char[?]', RECV_SIZE)
@@ -153,27 +154,28 @@ if ffi and RPC.unix then
     local POLLERR = 0x008
     local POLLHUP = 0x010
 
+    local pfd = ffi.new('struct pollfd[1]')
     local function wait_fd(fd, events, timeout_ms)
-        local pfd = ffi.new('struct pollfd[1]')
         pfd[0].fd = fd
         pfd[0].events = events
+        pfd[0].revents = 0
         local r = C.poll(pfd, 1, timeout_ms)
         if r <= 0 then return false end
         return bit.band(pfd[0].revents, events + POLLERR + POLLHUP) ~= 0
     end
 
     local function wait_readable(fd, timeout_ms)
-        local pfd = ffi.new('struct pollfd[1]')
         pfd[0].fd = fd
         pfd[0].events = POLLIN
+        pfd[0].revents = 0
         local r = C.poll(pfd, 1, timeout_ms)
         if r <= 0 then return false end
         return bit.band(pfd[0].revents, POLLIN + POLLERR + POLLHUP) ~= 0
     end
 
     function RPC:read_available()
-        local pfd = ffi.new('struct pollfd[1]')
         pfd[0].fd, pfd[0].events = self.socket, POLLIN
+        pfd[0].revents = 0
         local ready = C.poll(pfd, 1, 0)
         if ready == 0 then return '' end
         if ready < 0 then return nil end
@@ -187,17 +189,15 @@ if ffi and RPC.unix then
     end
 
     local SEND_SIZE = 65536
-    local send_buf = ffi.new('char[?]', SEND_SIZE)
-
     function RPC:send_raw(data)
         if not self.socket then return false end
         local total = #data
         local sent = 0
+        local data_ptr = ffi.cast(const_byte_ptr, data)
         local deadline = mp.get_time() + 1.5
         while sent < total do
             local chunk = math.min(SEND_SIZE, total - sent)
-            ffi.copy(send_buf, data:sub(sent + 1, sent + chunk), chunk)
-            local n = C.send(self.socket, send_buf, chunk, 0)
+            local n = C.send(self.socket, data_ptr + sent, chunk, 0)
             if n > 0 then
                 sent = sent + n
             else
@@ -260,6 +260,7 @@ elseif ffi and not RPC.unix then
         BOOL PeekNamedPipe(HANDLE, LPVOID, DWORD, LPDWORD, LPDWORD, LPDWORD);
     ]]
     local C = ffi.C
+    local const_byte_ptr = ffi.typeof('const uint8_t*')
     local INVALID = ffi.cast('HANDLE', -1)
     local GENERIC_READ  = 0x80000000
     local GENERIC_WRITE = 0x40000000
@@ -369,16 +370,14 @@ elseif ffi and not RPC.unix then
         return false
     end
 
-    local send_buf = ffi.new('char[?]', 65536)
-
     function RPC:send_raw(data)
         if not self.socket then return false end
         local total = #data
         local sent = 0
+        local data_ptr = ffi.cast(const_byte_ptr, data)
         while sent < total do
             local chunk = math.min(65536, total - sent)
-            ffi.copy(send_buf, data:sub(sent + 1, sent + chunk), chunk)
-            if C.WriteFile(self.socket, send_buf, chunk, written, nil) == 0
+            if C.WriteFile(self.socket, data_ptr + sent, chunk, written, nil) == 0
                 or written[0] == 0 then
                 return false
             end

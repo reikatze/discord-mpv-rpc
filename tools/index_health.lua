@@ -1,6 +1,12 @@
 -- Shared manifest checks; full validation runs only in the background worker.
 return function(utils)
     local M={}
+    local ffi
+    if rawget(_G,'jit') then
+        local ok,loaded=pcall(require,'ffi')
+        if ok then ffi=loaded end
+    end
+    local byte_ptr=ffi and ffi.typeof('const uint8_t*') or nil
     function M.base(root,meta,media)
         return root..meta.generation..(meta.layout=='flat' and '-' or '/')..media
     end
@@ -60,7 +66,19 @@ return function(utils)
         while true do
             local s=f:read(65536);if not s then break end
             size=size+#s
-            for i=1,#s do a=(a+s:byte(i))%65521;b=(b+a)%65521 end
+            if byte_ptr then
+                -- 5552 is the largest safe Adler-32 block before reduction.
+                -- FFI removes per-byte string.byte and modulo calls.
+                local p=ffi.cast(byte_ptr,s)
+                local i=0
+                while i<#s do
+                    local stop=math.min(i+5552,#s)
+                    while i<stop do a=a+p[i];b=b+a;i=i+1 end
+                    a=a%65521;b=b%65521
+                end
+            else
+                for i=1,#s do a=(a+s:byte(i))%65521;b=(b+a)%65521 end
+            end
         end
         f:close();return {size=size,adler=b*65536+a}
     end

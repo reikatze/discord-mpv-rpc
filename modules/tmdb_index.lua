@@ -84,10 +84,7 @@ return function(modules, shared)
         launch()
     end
     local function less(a, b)
-        for i = 1, math.min(#a, #b) do
-            if a:byte(i) ~= b:byte(i) then return a:byte(i) < b:byte(i) end
-        end
-        return #a < #b
+        return a < b
     end
     local function candidates(title, is_tv)
         local loaded, meta = pcall(load_manifest)

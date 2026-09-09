@@ -125,6 +125,58 @@ equal(gunzip(gzip_holder), 'hello', 'gzip framing and checksums')
 equal(gzip_holder.data, nil, 'gzip source release')
 equal(compressed_seen, true, 'raw DEFLATE extraction')
 
+local health_factory = assert(loadfile(root .. '/tools/index_health.lua'))()
+local health = health_factory({})
+local fingerprint_path = os.tmpname()
+local fingerprint_file = assert(io.open(fingerprint_path, 'wb'))
+assert(fingerprint_file:write('Wikipedia'))
+assert(fingerprint_file:close())
+local fingerprint = health.fingerprint(fingerprint_path)
+os.remove(fingerprint_path)
+equal(fingerprint.size, 9, 'fingerprint size')
+equal(fingerprint.adler, 0x11E60398, 'Adler-32 fallback')
+
+local builder_factory = assert(loadfile(root .. '/tools/index_builder.lua'))()
+local builder_json = {
+    parse_json = function(line)
+        return {
+            id = tonumber(assert(line:match('"id":(%d+)'))),
+            original_title = assert(line:match('"original_title":"([^"]+)"')),
+            adult = false,
+            video = false,
+        }
+    end,
+    format_json = function(value)
+        if type(value) == 'string' then return '"' .. value .. '"' end
+        local values = {}
+        for i = 1, #value do values[i] = string.format('%.0f', value[i]) end
+        return '[' .. table.concat(values, ',') .. ']'
+    end,
+}
+local builder = builder_factory(builder_json, function(holder)
+    local value = holder.data
+    holder.data = nil
+    return value
+end)
+local builder_source = os.tmpname()
+local builder_base = builder_source .. '.index'
+local builder_input = assert(io.open(builder_source, 'wb'))
+assert(builder_input:write(
+    '{"id":2,"original_title":"Zulu"}\n' ..
+    '{"id":3,"original_title":"Alpha"}\n' ..
+    '{"id":1,"original_title":"Alpha"}\n'))
+assert(builder_input:close())
+equal(builder(builder_source, builder_base, 'movie', noop), 2,
+    'temporary index records')
+local builder_data = assert(io.open(builder_base .. '.jsonl', 'rb'))
+local builder_text = assert(builder_data:read('*a'))
+builder_data:close()
+os.remove(builder_source)
+os.remove(builder_base .. '.jsonl')
+os.remove(builder_base .. '.offsets')
+equal(builder_text, '["alpha",[1,3]]\n["zulu",[2]]\n',
+    'native string index ordering')
+
 for _,path in ipairs({
     'main.lua',
     'db/parsing_keywords.lua',

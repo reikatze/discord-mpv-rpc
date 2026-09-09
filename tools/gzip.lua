@@ -2,6 +2,11 @@
 return function(deflate)
     local ok, bit = pcall(require, 'bit')
     if not ok then bit = rawget(_G, 'bit32') end
+    local ffi
+    if rawget(_G, 'jit') then
+        local ffi_ok, loaded = pcall(require, 'ffi')
+        if ffi_ok then ffi = loaded end
+    end
     local function arithmetic_xor(a,b)
         local n,p=0,1
         for _=1,32 do
@@ -21,12 +26,29 @@ return function(deflate)
         end
         crc_table[i]=c
     end
-    local function crc32(s)
-        local c=4294967295
-        for i=1,#s do
-            c=unsigned(xor(math.floor(c/256),crc_table[unsigned(xor(c,s:byte(i)))%256]))
+    local crc32
+    if ffi and bit and bit.band and bit.rshift then
+        -- LuaJIT traces this pointer loop and performs the CRC with native
+        -- 32-bit operations. The Lua string stays alive for the whole call.
+        local byte_ptr=ffi.typeof('const uint8_t*')
+        local band,bxor,rshift=bit.band,bit.bxor,bit.rshift
+        crc32=function(s)
+            local c=-1
+            local p=ffi.cast(byte_ptr,s)
+            for i=0,#s-1 do
+                c=bxor(rshift(c,8),crc_table[band(bxor(c,p[i]),255)])
+            end
+            c=bxor(c,-1)
+            return c<0 and c+4294967296 or c
         end
-        return unsigned(xor(c,4294967295))
+    else
+        crc32=function(s)
+            local c=4294967295
+            for i=1,#s do
+                c=unsigned(xor(math.floor(c/256),crc_table[unsigned(xor(c,s:byte(i)))%256]))
+            end
+            return unsigned(xor(c,4294967295))
+        end
     end
     local function u32(s,p)
         local a,b,c,d=s:byte(p,p+3)

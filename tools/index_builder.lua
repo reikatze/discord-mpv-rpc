@@ -6,12 +6,7 @@ return function(json,gunzip)
             :gsub('^ +',''):gsub(' +$',''))
     end
     local function less(a,b)
-        if a[1]~=b[1] then
-            for i=1,math.min(#a[1],#b[1]) do
-                if a[1]:byte(i)~=b[1]:byte(i) then return a[1]:byte(i)<b[1]:byte(i) end
-            end
-            return #a[1]<#b[1]
-        end
+        if a[1]~=b[1] then return a[1]<b[1] end
         return a[2]<b[2]
     end
     return function(source,base,media,log)
@@ -20,9 +15,16 @@ return function(json,gunzip)
             local f=assert(io.open(path,mode));handles[#handles+1]=f;return f
         end
         local function write(f,s) assert(f:write(s)) end
-        local function encode(row) return assert(json.format_json(row))..'\n' end
-        local function read(f)
-            local s=f:read('*l');return s and assert(json.parse_json(s)) or nil
+        local function write_run(f,row)
+            write(f,row[1]..'\t'..string.format('%.0f',row[2])..'\n')
+        end
+        local function read_run(f)
+            local s=f:read('*l')
+            if not s then return nil end
+            local key,id=s:match('^(.*)\t(%d+)$')
+            id=tonumber(id)
+            assert(key and id and id>0 and id%1==0,'invalid temporary index row')
+            return {key,id}
         end
         local success,result=pcall(function()
             local input=open(source,'rb');local raw=assert(input:read('*a'));input:close()
@@ -35,7 +37,7 @@ return function(json,gunzip)
                 local path=base..'.run'..(#runs+1)
                 temporary[#temporary+1]=path
                 local f=open(path,'wb')
-                for _,row in ipairs(batch) do write(f,encode(row)) end
+                for _,row in ipairs(batch) do write_run(f,row) end
                 assert(f:close());runs[#runs+1]=path;batch={}
             end
             local line_number=0
@@ -66,10 +68,10 @@ return function(json,gunzip)
                     else
                         local path=base..'.merge'..pass..'-'..i;temporary[#temporary+1]=path
                         local a,b,out=open(runs[i],'rb'),open(runs[i+1],'rb'),open(path,'wb')
-                        local x,y=read(a),read(b)
+                        local x,y=read_run(a),read_run(b)
                         while x or y do
-                            if x and (not y or less(x,y)) then write(out,encode(x));x=read(a)
-                            else write(out,encode(y));y=read(b) end
+                            if x and (not y or less(x,y)) then write_run(out,x);x=read_run(a)
+                            else write_run(out,y);y=read_run(b) end
                         end
                         a:close();b:close();assert(out:close())
                         os.remove(runs[i]);os.remove(runs[i+1]);next_runs[#next_runs+1]=path
@@ -91,7 +93,7 @@ return function(json,gunzip)
                 end
             end
             while true do
-                local row=read(input);if not row then break end
+                local row=read_run(input);if not row then break end
                 if previous~=row[1] then emit();previous=row[1];ids={};last=nil end
                 if row[2]~=last then
                     if #ids<=4 then ids[#ids+1]=row[2] end
