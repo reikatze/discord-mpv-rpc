@@ -50,6 +50,15 @@ return function(utils)
         return state
     end
     function M.stale(m) return os.time()-m.exported_at>=7*86400 end
+    function M.maintenance_due(meta,sizes_ok,state,now,interval)
+        if not meta or not sizes_ok or M.stale(meta) then return true end
+        if type(state)~='table' or state.generation~=meta.generation
+            or state.valid~=true or type(state.checked_at)~='number' then
+            return true
+        end
+        if state.checked_at>now+300 then return true end
+        return now-state.checked_at>=interval
+    end
     function M.sizes(root,m)
         for _,media in ipairs({'movie','tv'}) do
             local base=M.base(root,m,media)

@@ -30,6 +30,7 @@ local tmdb_abort_inflight_requests = modules.tmdb_requests.tmdb_abort_inflight_r
 ----------------------------------------------------------------
 local last = {
     activity_sig = nil,
+    activity_nonce = nil,
 }
 
 local activity = {
@@ -49,6 +50,8 @@ local timestamps = { start = 0, ['end'] = 0 }
 -- start/end timestamps by itself. Presence only needs to be sent on meaningful
 -- playback or metadata events (load, pause/resume, seek, chapter, TMDb result).
 local reconnect_timer = nil
+local rejection_retry_timer = nil
+local last_rejected_sig = nil
 
 local function stop_reconnect_watchdog()
     if reconnect_timer then
@@ -172,35 +175,96 @@ shared.tick = function(force)
         activity.timestamps = nil
     end
 
-    if RPC:set_activity(activity) then
+    local sent,nonce=RPC:set_activity(activity,{activity_sig=activity_sig})
+    if sent then
         last.activity_sig = activity_sig
+        last.activity_nonce = nonce
         stop_reconnect_watchdog()
     else
         start_reconnect_watchdog()
     end
 end
 
+local function stop_rejection_retry()
+    if rejection_retry_timer then rejection_retry_timer:kill() end
+    rejection_retry_timer=nil
+end
+
+RPC.on_response=function(_,pending)
+    local context=pending and pending.context
+    local sig=context and context.activity_sig
+    if sig and pending.nonce==last.activity_nonce then
+        last_rejected_sig=nil
+        stop_rejection_retry()
+    end
+end
+
+RPC.on_error=function(_,pending)
+    if not pending or pending.command~='SET_ACTIVITY' then return end
+    local context=pending.context
+    local sig=context and context.activity_sig
+    if not sig then return end
+    -- A response can arrive after a newer activity was sent. Only retry the
+    -- activity that is still current; an old rejection must not disturb it.
+    if pending.nonce~=last.activity_nonce or last.activity_sig~=sig then return end
+    last.activity_sig=nil
+    last.activity_nonce=nil
+    if not shared.enabled or last_rejected_sig==sig then return end
+    last_rejected_sig=sig
+    stop_rejection_retry()
+    rejection_retry_timer=mp.add_timeout(1,function()
+        rejection_retry_timer=nil
+        if shared.enabled and last.activity_sig==nil then shared.tick(true) end
+    end)
+end
+
 ----------------------------------------------------------------
 -- Events
 ----------------------------------------------------------------
+local PRESENCE_REFRESH_DELAY=0.075
+local presence_refresh_timer=nil
+local presence_refresh_force=false
+
+local function cancel_presence_refresh()
+    if presence_refresh_timer then presence_refresh_timer:kill() end
+    presence_refresh_timer=nil
+    presence_refresh_force=false
+end
+
+local function schedule_presence_refresh(force)
+    presence_refresh_force=presence_refresh_force or force==true
+    if presence_refresh_timer then return end
+    presence_refresh_timer=mp.add_timeout(PRESENCE_REFRESH_DELAY,function()
+        presence_refresh_timer=nil
+        local pending_force=presence_refresh_force
+        presence_refresh_force=false
+        if shared.enabled then shared.tick(pending_force) end
+    end)
+end
+
 local function reset_presence_state()
     last.activity_sig = nil
+    last.activity_nonce = nil
+    last_rejected_sig = nil
+    stop_rejection_retry()
 end
 
 local function on_pause(_, paused)
     if paused == nil or not shared.enabled then return end
     -- On resume this reads the current time-pos once and rebases Discord's
     -- timestamps, including any seek that happened while paused.
-    shared.tick(true)
+    schedule_presence_refresh(true)
 end
 
 mp.register_event('file-loaded', function()
+    cancel_presence_refresh()
     lookup_poster()
     reset_presence_state()
     shared.tick(true)
 end)
 
 mp.register_event('end-file', function()
+    cancel_presence_refresh()
     tmdb_abort_inflight_requests()
     shared.tmdb_lookup_generation = shared.tmdb_lookup_generation + 1
     clear_title_state()
@@ -215,39 +279,18 @@ mp.register_event('end-file', function()
     end
 end)
 
--- Seek/playback restarts can arrive in bursts. One timestamp rebase after the
--- burst is enough now that elapsed/remaining text is no longer displayed.
-local RESTART_DEBOUNCE = 0.4
-local last_restart_at  = 0
-local restart_pending  = false
-
 mp.register_event('playback-restart', function()
     if not shared.enabled then return end
-
-    local now = mp.get_time()
-    if now - last_restart_at < RESTART_DEBOUNCE then
-        if not restart_pending then
-            restart_pending = true
-            mp.add_timeout(RESTART_DEBOUNCE, function()
-                restart_pending = false
-                last_restart_at = mp.get_time()
-                shared.tick(true)
-            end)
-        end
-        return
-    end
-
-    last_restart_at = now
-    shared.tick(true)
+    schedule_presence_refresh(true)
 end)
 
 mp.observe_property('pause', 'bool', on_pause)
 mp.observe_property('paused-for-cache', 'bool', on_pause)
 mp.observe_property('speed', 'number', function(_, speed)
-    if speed ~= nil and shared.enabled then shared.tick(true) end
+    if speed ~= nil and shared.enabled then schedule_presence_refresh(true) end
 end)
 mp.observe_property('duration', 'number', function(_, duration)
-    if duration ~= nil and shared.enabled then shared.tick(true) end
+    if duration ~= nil and shared.enabled then schedule_presence_refresh(true) end
 end)
 
 mp.observe_property('chapter', 'number', function(_, idx)
@@ -255,16 +298,18 @@ mp.observe_property('chapter', 'number', function(_, idx)
     -- TMDb episode titles take precedence over chapter titles. If an episode
     -- title is already known, chapter changes do not alter Discord presence.
     if not shared.current_episode then
-        shared.tick(false)
+        schedule_presence_refresh(false)
     end
 end)
 
 mp.observe_property('idle-active', 'bool', function(_, idle)
     if idle == nil or not shared.enabled then return end
-    shared.tick(true)
+    schedule_presence_refresh(true)
 end)
 
 mp.register_event('shutdown', function()
+    cancel_presence_refresh()
+    stop_rejection_retry()
     stop_reconnect_watchdog()
     tmdb_abort_inflight_requests()
     if shared.poster_cache_save_timer then
@@ -285,6 +330,8 @@ mp.add_key_binding(KEY_TOGGLE, 'discord-mpv-rpc-toggle', function()
         end
         mp.osd_message('Discord RPC: on')
     else
+        cancel_presence_refresh()
+        stop_rejection_retry()
         stop_reconnect_watchdog()
         if RPC.socket then RPC:set_activity(nil) end
         RPC:close()

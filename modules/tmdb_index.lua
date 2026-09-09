@@ -8,9 +8,20 @@ return function(modules, shared)
     local enabled = modules.config.TMDB_LOCAL_INDEX ~= false
     local manifest, bad_generation, observed_generation
     local next_launch, next_read = 0, 0
+    local FULL_CHECK_INTERVAL = 24*60*60
+    local function maintenance_due()
+        local value=health.load(root)
+        local sizes_ok=value and health.sizes(root,value) or false
+        return health.maintenance_due(
+            value,sizes_ok,value and health.state(root) or nil,
+            os.time(),FULL_CHECK_INTERVAL
+        )
+    end
     local function launch()
         if not enabled or mp.get_time() < next_launch then return end
         next_launch = mp.get_time() + 3600
+        local checked,due=pcall(maintenance_due)
+        if checked and not due then return end
         if not rawget(_G,'jit') then
             modules.helpers.log_warn('automatic DB maintenance requires an mpv build with LuaJIT; using online search')
             return
@@ -82,7 +93,7 @@ return function(modules, shared)
     local function less(a, b)
         return a < b
     end
-    local function candidates(title, is_tv)
+    local function candidates_many(titles, is_tv)
         local loaded, meta = pcall(load_manifest)
         if not loaded or not meta then return {} end
         local media = is_tv and 'tv' or 'movie'
@@ -99,33 +110,46 @@ return function(modules, shared)
         end
         local ok, result = pcall(function()
             assert(offsets:seek('end') == count * 17)
-            local key = normalize(title)
-            local low, high = 0, count - 1
-            while low <= high do
-                local mid = math.floor((low + high) / 2)
-                assert(offsets:seek('set', mid * 17))
-                local entry = offsets:read(17)
-                assert(entry and entry:match('^%d+\n$'))
-                assert(data:seek('set', assert(tonumber(entry))))
-                local block = data:read(4096)
-                local line = block and block:match('^([^\n]*)\n')
-                local row = line and parse_json(line)
-                assert(type(row) == 'table' and type(row[1]) == 'string' and type(row[2]) == 'table')
-                if row[1] == key then
-                    if #row[2] > 4 then return {} end
-                    for _, id in ipairs(row[2]) do
-                        assert(type(id) == 'number' and id > 0 and id % 1 == 0)
+            local ids,seen,keys={},{},{}
+            for i=1,#titles do
+                local key=normalize(titles[i])
+                if key~='' and not keys[key] then
+                    keys[key]=true
+                    local low, high = 0, count - 1
+                    while low <= high do
+                        local mid = math.floor((low + high) / 2)
+                        assert(offsets:seek('set', mid * 17))
+                        local entry = offsets:read(17)
+                        assert(entry and entry:match('^%d+\n$'))
+                        assert(data:seek('set', assert(tonumber(entry))))
+                        local block = data:read(4096)
+                        local line = block and block:match('^([^\n]*)\n')
+                        local row = line and parse_json(line)
+                        assert(type(row) == 'table' and type(row[1]) == 'string'
+                            and type(row[2]) == 'table')
+                        if row[1] == key then
+                            if #row[2] <= 4 then
+                                for _,id in ipairs(row[2]) do
+                                    assert(type(id)=='number' and id>0 and id%1==0)
+                                    if not seen[id] then seen[id]=true;ids[#ids+1]=id end
+                                end
+                            end
+                            break
+                        elseif less(row[1], key) then low = mid + 1
+                        else high = mid - 1 end
                     end
-                    return row[2]
-                elseif less(row[1], key) then low = mid + 1
-                else high = mid - 1 end
+                end
             end
-            return {}
+            table.sort(ids)
+            return ids
         end)
         offsets:close()
         data:close()
         if not ok then corrupt();return {} end
         return result
+    end
+    local function candidates(title,is_tv)
+        return candidates_many({title},is_tv)
     end
     local function toggle()
         enabled=not enabled
@@ -146,7 +170,7 @@ return function(modules, shared)
     mp.add_periodic_timer(60,function()
         if enabled then pcall(load_manifest);launch() end
     end)
-    return {candidates = candidates, matches = function(a, b)
+    return {candidates = candidates, candidates_many = candidates_many, matches = function(a, b)
         return type(b) == 'string' and normalize(a) ~= '' and normalize(a) == normalize(b)
     end}
 end

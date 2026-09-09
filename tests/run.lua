@@ -226,7 +226,10 @@ local function staged_tmdb(responder, request_log)
             tmdb_lookup_cancelled = function() return false end,
         },
         tmdb_index = {
-            candidates = function() return {} end,
+            candidates_many = function() return {} end,
+            candidates = function()
+                error('batched local-index lookup was not used')
+            end,
             matches = function(a, b)
                 return title_normalize.normalize_index(a)
                     == title_normalize.normalize_index(b)
@@ -307,6 +310,28 @@ equal(compressed_seen, true, 'raw DEFLATE extraction')
 
 local health_factory = assert(loadfile(root .. '/tools/index_health.lua'))()
 local health = health_factory({})
+local health_now = os.time()
+local healthy_meta = {
+    generation = 'g0123456789abcdef0123456789abcdef',
+    exported_at = health_now - 86400,
+}
+equal(health.maintenance_due(healthy_meta, true, {
+    generation = healthy_meta.generation,
+    valid = true,
+    checked_at = health_now - 60,
+}, health_now, 86400), false, 'recent index maintenance check')
+equal(health.maintenance_due(healthy_meta, true, {
+    generation = healthy_meta.generation,
+    valid = true,
+    checked_at = health_now - 86400,
+}, health_now, 86400), true, 'due index maintenance check')
+equal(health.maintenance_due(healthy_meta, true, {
+    generation = healthy_meta.generation,
+    valid = false,
+    checked_at = health_now,
+}, health_now, 86400), true, 'failed index maintenance check')
+equal(health.maintenance_due(nil, false, nil, health_now, 86400), true,
+    'missing index maintenance check')
 local fingerprint_path = os.tmpname()
 local fingerprint_file = assert(io.open(fingerprint_path, 'wb'))
 assert(fingerprint_file:write('Wikipedia'))
@@ -356,6 +381,166 @@ os.remove(builder_base .. '.jsonl')
 os.remove(builder_base .. '.offsets')
 equal(builder_text, '["alpha",[1,3]]\n["zulu",[2]]\n',
     'native string index ordering')
+
+-- Discord replies are associated with the exact command context by nonce.
+local saved_socket_unix_preload = package.preload['socket.unix']
+local saved_socket_unix_loaded = package.loaded['socket.unix']
+package.loaded['socket.unix'] = nil
+package.preload['socket.unix'] = function()
+    return function() return {} end
+end
+local parsed_rpc_response
+local ipc_factory = assert(loadfile(root .. '/modules/ipc.lua'))()
+local ipc = assert(ipc_factory({
+    config = {CLIENT_ID = 'test-client', PID = 123},
+    helpers = {
+        byte = string.byte,
+        char = string.char,
+        floor = math.floor,
+        format = string.format,
+        format_json = function(value)
+            if type(value) == 'string' then return '"' .. value .. '"' end
+            return '{}'
+        end,
+        log_error = noop,
+        log_info = noop,
+        log_verbose = noop,
+        log_warn = noop,
+        parse_json = function() return parsed_rpc_response end,
+        sub = string.sub,
+    },
+}, {}))
+local test_rpc = ipc.RPC
+test_rpc.socket = {close = noop}
+test_rpc.send_raw = function() return true end
+local sent, nonce = test_rpc:set_activity({}, {activity_sig = 'activity-a'})
+equal(sent, true, 'tracked Discord command send')
+local rpc_error_context
+test_rpc.on_error = function(_, pending)
+    rpc_error_context = pending and pending.context
+end
+local function le32(n)
+    return string.char(n % 256, math.floor(n / 256) % 256,
+        math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256)
+end
+parsed_rpc_response = {evt = 'ERROR', nonce = nonce, data = {message = 'bad'}}
+test_rpc.rx_buffer = le32(1) .. le32(2) .. '{}'
+equal(test_rpc:drain_frames(), true, 'Discord error frame drain')
+equal(rpc_error_context.activity_sig, 'activity-a', 'Discord error nonce context')
+equal(test_rpc.pending[nonce], nil, 'Discord error clears pending command')
+local _, ack_nonce = test_rpc:set_activity({}, {activity_sig = 'activity-b'})
+local rpc_ack_context
+test_rpc.on_response = function(_, pending)
+    rpc_ack_context = pending and pending.context
+end
+parsed_rpc_response = {nonce = ack_nonce}
+test_rpc.rx_buffer = le32(1) .. le32(2) .. '{}'
+equal(test_rpc:drain_frames(), true, 'Discord response frame drain')
+equal(rpc_ack_context.activity_sig, 'activity-b', 'Discord response nonce context')
+package.preload['socket.unix'] = saved_socket_unix_preload
+package.loaded['socket.unix'] = saved_socket_unix_loaded
+
+-- Several related mpv events in one burst result in one presence update. A
+-- rejected current payload retries once; a late rejection for an older payload
+-- is ignored.
+local saved_mp = mp
+local event_handlers, property_handlers, presence_timers = {}, {}, {}
+local presence_properties = {
+    ['media-title'] = 'Activity A',
+    ['time-pos'] = 10,
+    duration = 100,
+    speed = 1,
+    pause = false,
+    ['paused-for-cache'] = false,
+    ['idle-active'] = false,
+}
+mp = {
+    add_timeout = function(delay, fn)
+        local timer = {delay = delay, fn = fn, killed = false}
+        function timer:kill() self.killed = true end
+        presence_timers[#presence_timers + 1] = timer
+        return timer
+    end,
+    add_periodic_timer = function(delay, fn)
+        local timer = {delay = delay, fn = fn, killed = false}
+        function timer:kill() self.killed = true end
+        presence_timers[#presence_timers + 1] = timer
+        return timer
+    end,
+    register_event = function(name, fn) event_handlers[name] = fn end,
+    observe_property = function(name, _, fn) property_handlers[name] = fn end,
+    add_key_binding = noop,
+    osd_message = noop,
+}
+local presence_sends = {}
+local presence_rpc = {
+    socket = true,
+    set_activity = function(_, _, context)
+        presence_sends[#presence_sends + 1] = context
+        return true, tostring(#presence_sends)
+    end,
+    handshake = function() return true end,
+    close = noop,
+    shutdown_fast = noop,
+}
+local presence_shared = {enabled = true, tmdb_lookup_generation = 0}
+assert(assert(loadfile(root .. '/modules/presence.lua'))()({
+    artwork = {presence_image = function(value) return value or 'fallback' end},
+    cache = {load_poster_cache = noop, save_poster_cache = noop},
+    config = {
+        ACTIVITY_WATCHING = 3,
+        FALLBACK_IMG = 'fallback', FALLBACK_TXT = 'fallback',
+        KEY_TOGGLE = 'D', SMALL_IDLE = '', SMALL_PAUSE = '', SMALL_PLAY = '',
+    },
+    filename = {meaningful_chapter_title = noop, tagged_title = noop},
+    helpers = {
+        floor = math.floor,
+        get_property = function(name) return presence_properties[name] end,
+        get_property_bool = function(name) return presence_properties[name] end,
+        get_property_number = function(name) return presence_properties[name] end,
+        log_warn = noop,
+        time = function() return 1000 end,
+        truncate_utf8 = function(value) return value end,
+    },
+    ipc = {RPC = presence_rpc, rpc_backoff_active = function() return false end},
+    metadata = {clear_title_state = noop, lookup_poster = noop},
+    tmdb_requests = {tmdb_abort_inflight_requests = noop},
+}, presence_shared))
+property_handlers.pause(nil, true)
+property_handlers.speed(nil, 2)
+property_handlers.duration(nil, 100)
+local refresh_count = 0
+local first_refresh
+for _, timer in ipairs(presence_timers) do
+    if timer.delay == 0.075 then refresh_count = refresh_count + 1; first_refresh = timer end
+end
+equal(refresh_count, 1, 'presence event burst coalescing')
+first_refresh.fn()
+equal(#presence_sends, 1, 'coalesced presence send count')
+local old_context = presence_sends[1]
+presence_properties['media-title'] = 'Activity B'
+event_handlers['playback-restart']()
+local second_refresh = presence_timers[#presence_timers]
+second_refresh.fn()
+local current_context = presence_sends[2]
+local timers_before_stale_error = #presence_timers
+presence_rpc.on_error({}, {
+    command = 'SET_ACTIVITY', nonce = '1', context = old_context,
+})
+equal(#presence_timers, timers_before_stale_error, 'stale Discord error ignored')
+presence_rpc.on_error({}, {
+    command = 'SET_ACTIVITY', nonce = '2', context = current_context,
+})
+local retry_timer = presence_timers[#presence_timers]
+equal(retry_timer.delay, 1, 'Discord rejection retry delay')
+retry_timer.fn()
+equal(#presence_sends, 3, 'Discord rejection retry send')
+local timers_before_second_error = #presence_timers
+presence_rpc.on_error({}, {
+    command = 'SET_ACTIVITY', nonce = '3', context = presence_sends[3],
+})
+equal(#presence_timers, timers_before_second_error, 'Discord rejection retries once')
+mp = saved_mp
 
 for _,path in ipairs({
     'main.lua',

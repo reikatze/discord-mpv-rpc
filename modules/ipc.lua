@@ -55,6 +55,7 @@ local RPC = {
     socket = nil,
     pid    = PID,
     unix   = package.config:sub(1, 1) == '/',
+    pending = {},
 }
 
 local ffi = _G.jit and require 'ffi' or nil
@@ -161,7 +162,8 @@ if ffi and RPC.unix then
         pfd[0].revents = 0
         local r = C.poll(pfd, 1, timeout_ms)
         if r <= 0 then return false end
-        return bit.band(pfd[0].revents, events + POLLERR + POLLHUP) ~= 0
+        if bit.band(pfd[0].revents,POLLERR+POLLHUP)~=0 then return false end
+        return bit.band(pfd[0].revents,events)~=0
     end
 
     local function wait_readable(fd, timeout_ms)
@@ -201,9 +203,20 @@ if ffi and RPC.unix then
             if n > 0 then
                 sent = sent + n
             else
-                local remaining_ms = floor((deadline - mp.get_time()) * 1000)
-                if remaining_ms <= 0 or not wait_fd(self.socket, POLLOUT, remaining_ms) then
+                if n == 0 then return false end
+                local err = ffi.errno()
+                if err == 4 then
+                    -- EINTR: retry immediately.
+                elseif err ~= 11 and err ~= 35 then
+                    -- Only EAGAIN/EWOULDBLOCK represents backpressure. Broken
+                    -- pipes and reset sockets must fail without a 1.5s wait.
                     return false
+                else
+                    local remaining_ms = floor((deadline - mp.get_time()) * 1000)
+                    if remaining_ms <= 0
+                        or not wait_fd(self.socket, POLLOUT, remaining_ms) then
+                        return false
+                    end
                 end
             end
         end
@@ -545,6 +558,7 @@ do
         self.reader_timer = nil
         self.rx_buffer = ''
         self.rx_started_at = nil
+        self.pending = {}
         transport_close(self)
     end
 end
@@ -554,6 +568,15 @@ function RPC:connection_failed(reason)
     self:close()
     rpc_note_failure()
     if self.on_disconnect then self.on_disconnect() end
+end
+
+local function prune_pending(self)
+    local now=mp.get_time()
+    for nonce,item in pairs(self.pending) do
+        if type(item)~='table' or now-(item.sent_at or now)>30 then
+            self.pending[nonce]=nil
+        end
+    end
 end
 
 function RPC:drain_frames()
@@ -574,13 +597,24 @@ function RPC:drain_frames()
         elseif op == 1 then
             local response = parse_json(payload)
             if type(response) ~= 'table' then return false end
+            local nonce=response.nonce and tostring(response.nonce) or nil
+            local pending=nonce and self.pending[nonce] or nil
+            if nonce then self.pending[nonce]=nil end
             if response.evt == 'ERROR' then
                 local data = type(response.data) == 'table' and response.data or {}
                 log_warn('Discord RPC error (nonce=' .. tostring(response.nonce)
                     .. '): ' .. tostring(data.message or data.code or 'unknown'))
+                if self.on_error then
+                    local ok,err=pcall(self.on_error,response,pending)
+                    if not ok then log_warn('Discord RPC error callback failed: '..tostring(err)) end
+                end
+            elseif pending and self.on_response then
+                local ok,err=pcall(self.on_response,response,pending)
+                if not ok then log_warn('Discord RPC response callback failed: '..tostring(err)) end
             end
         end
     end
+    prune_pending(self)
     return true
 end
 
@@ -677,7 +711,7 @@ function RPC:handshake()
     return true
 end
 
-function RPC:set_activity(activity)
+function RPC:set_activity(activity, context)
     if not self.socket and not self:handshake() then
         return false
     end
@@ -687,14 +721,20 @@ function RPC:set_activity(activity)
         encoded = format_json(activity)
         if not encoded then return false end
     end
-    local body = '{"cmd":"SET_ACTIVITY","nonce":' .. format_json(next_nonce())
+    local nonce=next_nonce()
+    local body = '{"cmd":"SET_ACTIVITY","nonce":' .. format_json(nonce)
         .. ',"args":{"pid":' .. tostring(PID) .. ',"activity":' .. encoded .. '}}'
 
+    prune_pending(self)
+    self.pending[nonce]={
+        command='SET_ACTIVITY',nonce=nonce,context=context,sent_at=mp.get_time()
+    }
     if not self:send_raw(pack(1, body)) then
+        self.pending[nonce]=nil
         self:connection_failed('Discord IPC send failed')
         return false
     end
-    return true
+    return true,nonce
 end
 
 function RPC:shutdown_fast()

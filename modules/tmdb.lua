@@ -761,6 +761,9 @@ local function build_query_titles(title, directory_title)
 end
 
 local function collect_index_ids(query_titles, is_tv)
+    if modules.tmdb_index.candidates_many then
+        return modules.tmdb_index.candidates_many(query_titles,is_tv)
+    end
     local values, seen = {}, {}
     for i = 1, #query_titles do
         local ids = modules.tmdb_index.candidates(query_titles[i], is_tv)
