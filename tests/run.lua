@@ -18,6 +18,45 @@ _G.mp = {
     get_property_native = function() return nil end,
 }
 
+-- Empty cache_path must leave CACHE_PATH unset so cache.lua stores beside
+-- main.lua. Explicit paths still go through mpv's expand-path command.
+local saved_preload, saved_loaded = {}, {}
+for _, name in ipairs({'mp.utils', 'mp.msg', 'mp.options'}) do
+    saved_preload[name] = package.preload[name]
+    saved_loaded[name] = package.loaded[name]
+    package.loaded[name] = nil
+end
+local configured_cache_path = ''
+local expand_path_calls = 0
+package.preload['mp.utils'] = function()
+    return {getpid = function() return 123 end}
+end
+package.preload['mp.msg'] = function() return {} end
+package.preload['mp.options'] = function()
+    return {read_options = function(options)
+        options.cache_path = configured_cache_path
+    end}
+end
+local saved_command_native = mp.command_native
+mp.command_native = function(command)
+    expand_path_calls = expand_path_calls + 1
+    return '/expanded/' .. command[2]
+end
+local config_factory = assert(loadfile(root .. '/modules/config.lua'))()
+local default_config = config_factory({}, {})
+equal(default_config.CACHE_PATH, nil, 'default script-directory cache path')
+equal(expand_path_calls, 0, 'default cache path needs no expansion')
+configured_cache_path = '~~/custom-cache.json'
+local custom_config = config_factory({}, {})
+equal(custom_config.CACHE_PATH, '/expanded/~~/custom-cache.json',
+    'custom cache path expansion')
+equal(expand_path_calls, 1, 'custom cache path expansion count')
+mp.command_native = saved_command_native
+for _, name in ipairs({'mp.utils', 'mp.msg', 'mp.options'}) do
+    package.preload[name] = saved_preload[name]
+    package.loaded[name] = saved_loaded[name]
+end
+
 local parsing = assert(loadfile(root .. '/db/parsing_keywords.lua'))()
 local title_normalize_factory =
     assert(loadfile(root .. '/modules/title_normalize.lua'))()
@@ -152,6 +191,86 @@ local directory_key = tmdb._test.show_cache_key(
     'Show Name', '2020', 'tv', 'Different Directory', {})
 equal(plain_key ~= directory_key, true, 'directory-aware show cache key')
 equal(plain_key:match('^show:v3|') ~= nil, true, 'show cache schema marker')
+
+local function staged_tmdb(responder, request_log)
+    return tmdb_factory({
+        cache = {
+            TMDB_NEGATIVE_CACHE_TTL = 1,
+            load_poster_cache = noop,
+            persistent_entry_expired = function() return false end,
+            remember_poster = noop,
+            schedule_poster_cache_save = noop,
+        },
+        config = {
+            TMDB_EPISODE_LOOKUP = true,
+            TMDB_KEY = 'test-key',
+            TMDB_LANG = 'en-US',
+            TMDB_POSITIVE_CACHE_TTL = 60,
+        },
+        helpers = {
+            format = string.format,
+            gsub = string.gsub,
+            log_info = noop,
+            log_verbose = noop,
+            log_warn = noop,
+            match = string.match,
+            time = function() return 1000 end,
+            trim_memory_cache = noop,
+        },
+        http = {url_encode = function(value) return tostring(value) end},
+        tmdb_requests = {
+            tmdb_get_json_cached = function(url)
+                request_log[#request_log + 1] = url
+                return responder(url)
+            end,
+            tmdb_lookup_cancelled = function() return false end,
+        },
+        tmdb_index = {
+            candidates = function() return {} end,
+            matches = function(a, b)
+                return title_normalize.normalize_index(a)
+                    == title_normalize.normalize_index(b)
+            end,
+        },
+        title_normalize = title_normalize,
+    }, {poster_cache = {}, tmdb_lookup_generation = 1})
+end
+
+local movie_requests = {}
+local movie_tmdb = staged_tmdb(function(url)
+    if url:find('query=Target&page', 1, true) then
+        return {results = {{
+            id = 10, media_type = 'movie', title = 'Target',
+            release_date = '2020-01-01', poster_path = '/target.jpg',
+        }}}, 'ok'
+    end
+    return {results = {}}, 'ok'
+end, movie_requests)
+local movie_hit = movie_tmdb.tmdb_lookup(
+    '[MysteryGroup] Target', '2020', false, nil, nil, nil, 1)
+equal(movie_hit and movie_hit.id, 10, 'movie bracket fallback result')
+equal(#movie_requests, 2, 'movie staged alternate request count')
+equal(movie_requests[2]:find('query=Target&page', 1, true) ~= nil, true,
+    'movie bracket fallback searched')
+
+local tv_requests = {}
+local tv_tmdb = staged_tmdb(function(url)
+    if url:find('query=Target Show&page', 1, true) then
+        return {results = {{
+            id = 20, name = 'Target Show', first_air_date = '2020-01-01',
+            poster_path = '/target-show.jpg',
+        }}}, 'ok'
+    end
+    return {results = {}}, 'ok'
+end, tv_requests)
+local tv_hit = tv_tmdb.tmdb_lookup(
+    '[MysteryGroup] Wrong', '2020', true, nil, nil, 'Target Show', 1)
+equal(tv_hit and tv_hit.id, 20, 'TV directory fallback result')
+equal(#tv_requests, 3, 'TV staged directory request count')
+equal(tv_requests[3]:find('query=Target Show&page', 1, true) ~= nil, true,
+    'TV directory fallback searched')
+equal(tv_requests[3]:find('first_air_date_year=2020', 1, true) ~= nil, true,
+    'TV directory fallback preserves year filter')
 
 local cache_factory = assert(loadfile(root .. '/modules/cache.lua'))()
 local cache = cache_factory({
