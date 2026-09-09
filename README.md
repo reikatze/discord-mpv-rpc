@@ -8,8 +8,8 @@
 Show what you are watching in [mpv](https://mpv.io/) as Discord Rich Presence. Add a free [TMDb](https://www.themoviedb.org/) API key for official titles, posters, episode names, and episode stills.
 
 <p align="center">
-  <img src="assets/preview-1.png" alt="Discord Rich Presence showing Dragon Ball DAIMA" width="48%">
-  <img src="assets/preview-2.png" alt="Discord Rich Presence showing The Boy And The Heron" width="48%">
+  <img src="assets/preview-1.png" alt="Discord Rich Presence showing Dragon Ball DAIMA" width="48%" height="160">
+  <img src="assets/preview-2.png" alt="Discord Rich Presence showing The Boy And The Heron" width="48%" height="160">
 </p>
 
 ## Highlights
@@ -100,7 +100,7 @@ With a custom application, optionally upload square Rich Presence assets named `
 | `poster_fit` | `contain` | `contain` letterboxes artwork through wsrv.nl; `raw` uses the TMDb URL directly |
 | `enabled` | `yes` | Enables Rich Presence at startup |
 
-Restart mpv after editing the configuration file. The old `update_interval` option has no effect because updates are event-driven.
+Restart mpv after editing the configuration file.
 
 ## What Discord displays
 
