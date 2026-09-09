@@ -1,10 +1,6 @@
 -- Bounded sorting runs and two-way disk merges. Requires only Lua and JSON functions.
-return function(json,gunzip)
-    local function normalize(s)
-        return (s:gsub('[A-Z]',function(c) return string.char(c:byte()+32) end)
-            :gsub('[\009-\013\032-\047\058-\064\091-\096\123-\126]+',' ')
-            :gsub('^ +',''):gsub(' +$',''))
-    end
+return function(json,gunzip,normalize)
+    assert(type(normalize)=='function','title normalizer is required')
     local function less(a,b)
         if a[1]~=b[1] then return a[1]<b[1] end
         return a[2]<b[2]

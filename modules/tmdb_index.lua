@@ -2,6 +2,7 @@
 return function(modules, shared)
     local root = modules.helpers.SCRIPT_DIR .. '/db/tmdb/'
     local parse_json = modules.helpers.parse_json
+    local normalize = modules.title_normalize.normalize_index
     local tools_dir = modules.helpers.SCRIPT_DIR .. '/tools/'
     local health = assert(loadfile(tools_dir .. 'index_health.lua'))()(modules.config.utils)
     local enabled = modules.config.TMDB_LOCAL_INDEX ~= false
@@ -34,11 +35,6 @@ return function(modules, shared)
                 modules.helpers.log_warn('could not start background DB maintenance; online search remains available')
             end
         end)
-    end
-    local function normalize(s)
-        s = s:gsub('[A-Z]', function(c) return string.char(c:byte() + 32) end)
-        return (s:gsub('[\009-\013\032-\047\058-\064\091-\096\123-\126]+', ' ')
-            :gsub('^ +', ''):gsub(' +$', ''))
     end
     local function load_manifest()
         if not enabled then return nil end

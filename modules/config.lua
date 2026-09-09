@@ -51,11 +51,8 @@ local PID          = utils.getpid()
 local IS_WINDOWS   = package.config:sub(1, 1) == '\\'
 local PATH_SEP     = package.config:sub(1, 1)
 local cache_path = o.cache_path
-if not cache_path or cache_path == '' then
-    cache_path = '~~/discord-mpv-rpc-posters.json'
-end
 local expanded_cache_path = nil
-do
+if cache_path and cache_path ~= '' then
     local ok, value = pcall(mp.command_native, {'expand-path', cache_path})
     if ok and type(value) == 'string' and value ~= '' then
         expanded_cache_path = value

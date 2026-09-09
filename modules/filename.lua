@@ -7,6 +7,7 @@ local get_property_number = modules.helpers.get_property_number
 local gsub = modules.helpers.gsub
 local match = modules.helpers.match
 local sub = modules.helpers.sub
+local title_normalize = modules.title_normalize
 
 -- Parsed filename cache: mpv can trigger several events for the same path.
 local parsed_filename_cache = {}
@@ -93,15 +94,43 @@ local function extract_episode_info(name)
 end
 
 local function extract_year(name)
-    return match(name, '%((19%d%d)%)')
-        or match(name, '%((20%d%d)%)')
-        or match(name, '%f[%d](19%d%d)%f[%D]')
-        or match(name, '%f[%d](20%d%d)%f[%D]')
+    -- Parenthesized years are explicit. If more than one is present, the last
+    -- is normally the release year rather than a numeric title component.
+    local year, year_start, year_end
+    local from = 1
+    while true do
+        local first, last, value
+        local a1, b1, y1 = name:find('%((19%d%d)%)', from)
+        local a2, b2, y2 = name:find('%((20%d%d)%)', from)
+        if a1 and (not a2 or a1 < a2) then first,last,value=a1,b1,y1
+        elseif a2 then first,last,value=a2,b2,y2 end
+        if not first then break end
+        year, year_start, year_end = value, first, last
+        from = last + 1
+    end
+    if year then return year, year_start, year_end end
+
+    -- For bare years, use the final plausible token and require meaningful
+    -- title text before it. Thus "1917.2019" selects 2019, while a title that
+    -- is itself just "1917" is not erased.
+    from = 1
+    while true do
+        local first, last, value = name:find('%f[%d](19%d%d)%f[%D]', from)
+        local a2, b2, y2 = name:find('%f[%d](20%d%d)%f[%D]', from)
+        if not first or (a2 and a2 < first) then first,last,value=a2,b2,y2 end
+        if not first then break end
+        local before = sub(name, 1, first - 1)
+        if before:find('[%w\128-\255]') then
+            year, year_start, year_end = value, first, last
+        end
+        from = last + 1
+    end
+    return year, year_start, year_end
 end
 
-local function derive_title(name, year, is_tv)
+local function derive_title(name, year, is_tv, year_start)
     if is_tv then
-        return match(name, '^(.-)%s*[sS]%d+%s*[-%.]?%s*[eE]%s*%d+')
+        local title = match(name, '^(.-)%s*[sS]%d+%s*[-%.]?%s*[eE]%s*%d+')
             or match(name, '^(.-)%s*[sS]%d+%s*%-%s*%d+')
             or match(name, '^(.-)[%s%._%-]%d+[xX]%d+')
             or match(name, '^(.-)%s*[sS]eason%s*%d+%s*[,%-]?%s*[eE]pisode%s*%d+')
@@ -113,14 +142,13 @@ local function derive_title(name, year, is_tv)
             or match(name, '^(.-)%s*%-%s*%d+%s*[vV]%d+%s*$')
             or match(name, '^(.-)%s*%-%s*%d+%s*$')
             or name
+        if year and year_start and year_start <= #title then
+            title = sub(name, 1, year_start - 1)
+        end
+        return title
     end
 
-    if year then
-        return match(name, '^(.-)%s*%(' .. year .. '%)')
-            or match(name, '^(.-)[%s%._%-]+' .. year)
-            or match(name, '^(.-)' .. year)
-            or name
-    end
+    if year and year_start then return sub(name, 1, year_start - 1) end
 
     return name
 end
@@ -130,8 +158,39 @@ end
 local release_suffixes = modules.database.parsing.release_suffixes
 local release_groups = modules.database.parsing.release_groups
 
+local function exact_release_tag(value)
+    for i = 1, #release_suffixes do
+        if value:match('^' .. release_suffixes[i] .. '$') then return true end
+    end
+    for i = 1, #release_groups do
+        if value == release_groups[i]:lower() then return true end
+    end
+    return false
+end
+
+local function known_bracket_content(content)
+    content = title_normalize.trim(content:lower())
+    if content == '' then return false end
+    if exact_release_tag(content) then return true end
+    for token in content:gmatch('[^%s,;/]+') do
+        if not exact_release_tag(token) then
+            local recognized = true
+            local pieces = 0
+            for piece in token:gmatch('[^_%-]+') do
+                pieces = pieces + 1
+                if not exact_release_tag(piece) then recognized = false;break end
+            end
+            if pieces < 2 or not recognized then return false end
+        end
+    end
+    return true
+end
+
 local function strip_filename_release_tags(name)
-    name = gsub(name, '%b[]', ' ')
+    name = gsub(name, '%b[]', function(block)
+        local content = sub(block, 2, -2)
+        return known_bracket_content(content) and ' ' or block
+    end)
     -- Unbracketed group prefixes require a dash, avoiding damage to titles
     -- such as "Judas and the Black Messiah".
     for _, group in ipairs(release_groups) do
@@ -163,10 +222,7 @@ local function normalize_filename_title(title)
     title = gsub(title, '[%.%_]', ' ')
     title = strip_filename_release_tags(title)
     title = gsub(title, '^%s*%-%s*', '')
-    title = gsub(title, '%s+', ' ')
-    title = gsub(title, '^%s+', '')
-    title = gsub(title, '%s+$', '')
-    return title
+    return title_normalize.trim(title)
 end
 
 local function directory_context(path)
@@ -174,12 +230,10 @@ local function directory_context(path)
     if not dir or dir == '' then return nil, nil end
 
     local name = match(dir, '([^/\\]+)$') or dir
-    local year = extract_year(name)
+    local year, year_start = extract_year(name)
     if not year then return nil, nil end
 
-    local title = name
-    title = gsub(title, '^%b[]%s*', '')
-    title = gsub(title, '%s*%(' .. year .. '%)%s*$', '')
+    local title = derive_title(name, year, false, year_start)
     title = normalize_filename_title(title)
     if title == '' then return nil, year end
     return title, year
@@ -207,8 +261,8 @@ local function clean_filename(path)
     name = strip_filename_release_tags(name)
 
     local season, ep, is_tv = extract_episode_info(name)
-    local year = extract_year(name)
-    local title = derive_title(name, year, is_tv)
+    local year, year_start = extract_year(name)
+    local title = derive_title(name, year, is_tv, year_start)
     title = normalize_filename_title(title)
 
     -- If the filename omits its year, inherit a year from a media/show

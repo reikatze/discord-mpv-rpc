@@ -18,6 +18,7 @@ end
 
 load_module('config')
 load_module('helpers')
+load_module('title_normalize')
 load_module('database')
 load_module('tmdb_index')
 load_module('cache')

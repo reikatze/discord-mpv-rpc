@@ -19,6 +19,9 @@ _G.mp = {
 }
 
 local parsing = assert(loadfile(root .. '/db/parsing_keywords.lua'))()
+local title_normalize_factory =
+    assert(loadfile(root .. '/modules/title_normalize.lua'))()
+local title_normalize = title_normalize_factory()
 local filename_factory = assert(loadfile(root .. '/modules/filename.lua'))()
 local filename = filename_factory({
     helpers = {
@@ -30,6 +33,7 @@ local filename = filename_factory({
         sub = string.sub,
     },
     database = {parsing = parsing},
+    title_normalize = title_normalize,
 }, {})
 
 local title, year, is_tv, season, episode =
@@ -47,6 +51,48 @@ equal(year, '2014', 'movie year parsing')
 
 title = filename.clean_filename('Movie.Name.(1080p).x265.mkv')
 equal(title, 'Movie Name', 'parenthesized technical suffix')
+
+title, year = filename.clean_filename('2001.A.Space.Odyssey.1968.mkv')
+equal(title, '2001 A Space Odyssey', 'numeric movie title')
+equal(year, '1968', 'last plausible release year')
+
+title, year = filename.clean_filename('1917.mkv')
+equal(title, '1917', 'year-shaped title')
+equal(year, nil, 'year-shaped title has no inferred release year')
+
+title, year = filename.clean_filename('1917.2019.mkv')
+equal(title, '1917', 'numeric title before release year')
+equal(year, '2019', 'numeric title release year')
+
+title, year, is_tv = filename.clean_filename('1923.S01E01.mkv')
+equal(title, '1923', 'numeric TV title')
+equal(year, nil, 'numeric TV title has no inferred release year')
+equal(is_tv, true, 'numeric TV title detection')
+
+title, year = filename.clean_filename('Show.Name.2020.S01E01.mkv')
+equal(title, 'Show Name', 'TV release year removal')
+equal(year, '2020', 'TV release year detection')
+
+title, year = filename.clean_filename('[REC].2007.mkv')
+equal(title, '[REC]', 'legitimate bracketed movie title')
+equal(year, '2007', 'bracketed movie year')
+
+title = filename.clean_filename('[Oshi no Ko].S01E01.mkv')
+equal(title, '[Oshi no Ko]', 'legitimate bracketed TV title')
+
+title = filename.clean_filename(
+    'Movie.Name.[DSNP WEBDL-1080p][EAC3 5.1][h264].mkv')
+equal(title, 'Movie Name', 'known bracketed release tags')
+
+title = filename.clean_filename('[MysteryGroup] Show.Name.2020.S01E01.mkv')
+equal(title, '[MysteryGroup] Show Name', 'unknown bracket group preservation')
+
+equal(title_normalize.normalize_match('攻殻機動隊'), '攻殻機動隊',
+    'UTF-8 match normalization')
+equal(title_normalize.normalize_match('Амели!'), 'Амели',
+    'Cyrillic preservation')
+equal(title_normalize.normalize_index('Tom & Jerry'), 'tom jerry',
+    'bundled index normalization compatibility')
 
 local tmdb_factory = assert(loadfile(root .. '/modules/tmdb.lua'))()
 local noop = function() end
@@ -83,6 +129,7 @@ local tmdb = tmdb_factory({
         candidates = function() return {} end,
         matches = function(a, b) return a == b end,
     },
+    title_normalize = title_normalize,
 }, {poster_cache = {}, tmdb_lookup_generation = 1})
 
 equal(tmdb._test.format_episode_title(4, 20, 'Chatty'),
@@ -91,6 +138,20 @@ equal(tmdb._test.format_episode_title(4, nil, 'Chatty'),
     '04: Chatty', 'episode fallback formatting')
 equal(tmdb._test.title_similarity('Dune', 'Dune: Part Two') > 0.7,
     true, 'subtitle similarity')
+equal(tmdb._test.title_similarity('攻殻機動隊', '攻殻機動隊'), 1,
+    'Unicode title similarity')
+local bracket_queries = tmdb._test.build_query_titles(
+    '[MysteryGroup] Show Name', nil)
+equal(#bracket_queries, 2, 'ambiguous bracket query count')
+equal(bracket_queries[1], '[MysteryGroup] Show Name',
+    'preserved bracket query priority')
+equal(bracket_queries[2], 'Show Name', 'stripped bracket query fallback')
+local plain_key = tmdb._test.show_cache_key(
+    'Show Name', '2020', 'tv', nil, {})
+local directory_key = tmdb._test.show_cache_key(
+    'Show Name', '2020', 'tv', 'Different Directory', {})
+equal(plain_key ~= directory_key, true, 'directory-aware show cache key')
+equal(plain_key:match('^show:v3|') ~= nil, true, 'show cache schema marker')
 
 local cache_factory = assert(loadfile(root .. '/modules/cache.lua'))()
 local cache = cache_factory({
@@ -157,7 +218,7 @@ local builder = builder_factory(builder_json, function(holder)
     local value = holder.data
     holder.data = nil
     return value
-end)
+end, title_normalize.normalize_index)
 local builder_source = os.tmpname()
 local builder_base = builder_source .. '.index'
 local builder_input = assert(io.open(builder_source, 'wb'))
@@ -193,6 +254,7 @@ for _,path in ipairs({
     'modules/tmdb.lua',
     'modules/tmdb_index.lua',
     'modules/tmdb_requests.lua',
+    'modules/title_normalize.lua',
     'tools/gzip.lua',
     'tools/index_builder.lua',
     'tools/index_health.lua',

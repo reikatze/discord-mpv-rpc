@@ -21,6 +21,8 @@ local trim_memory_cache = modules.helpers.trim_memory_cache
 local url_encode = modules.http.url_encode
 local tmdb_get_json_cached = modules.tmdb_requests.tmdb_get_json_cached
 local tmdb_lookup_cancelled = modules.tmdb_requests.tmdb_lookup_cancelled
+local normalize_match_title = modules.title_normalize.normalize_match
+local leading_bracket_alternative = modules.title_normalize.leading_bracket_alternative
 
 -- Missing exact episodes are persisted briefly so a season TMDb has not added
 -- yet is not retried on every playback. Successful episode metadata is stored
@@ -55,17 +57,6 @@ local function tmdb_official_title(result)
         return official
     end
     return result.original_title or result.original_name
-end
-
-local function normalize_match_title(s)
-    if not s then return '' end
-    s = s:lower()
-    s = gsub(s, '[&]', ' and ')
-    s = gsub(s, '[^%w]+', ' ')
-    s = gsub(s, '^%s+', '')
-    s = gsub(s, '%s+$', '')
-    s = gsub(s, '%s+', ' ')
-    return s
 end
 
 local function title_tokens(s)
@@ -740,6 +731,59 @@ local function tmdb_resolve_aliases_tiered(
     return best, best_score, second_score, outcome
 end
 
+local SHOW_CACHE_VERSION = 3
+
+local function build_query_titles(title, directory_title)
+    local values, seen = {}, {}
+    local function add(value)
+        local normalized = normalize_match_title(value)
+        if normalized == '' or seen[normalized] then return end
+        seen[normalized] = true
+        values[#values + 1] = value
+    end
+    add(title)
+    add(leading_bracket_alternative(title))
+    add(directory_title)
+    add(leading_bracket_alternative(directory_title))
+    return values
+end
+
+local function collect_index_ids(query_titles, is_tv)
+    local values, seen = {}, {}
+    for i = 1, #query_titles do
+        local ids = modules.tmdb_index.candidates(query_titles[i], is_tv)
+        for n = 1, #ids do
+            local id = ids[n]
+            if not seen[id] then
+                seen[id] = true
+                values[#values + 1] = id
+            end
+        end
+    end
+    table.sort(values)
+    return values
+end
+
+local function show_cache_key(
+    title, year, preferred_type, directory_title, index_ids
+)
+    local cache_title = normalize_match_title(title)
+    local cache_directory = normalize_match_title(directory_title)
+    if cache_directory == cache_title then cache_directory = '' end
+    local key = table.concat({
+        'show:v' .. SHOW_CACHE_VERSION,
+        preferred_type,
+        cache_title,
+        year or '',
+        TMDB_LANG,
+        'dir:' .. cache_directory,
+    }, '|')
+    if #index_ids > 0 then
+        key = key .. '|export:' .. table.concat(index_ids, ',')
+    end
+    return key, cache_directory
+end
+
 local function tmdb_lookup(
     title, year, is_tv, season, ep, directory_title, lookup_token
 )
@@ -754,18 +798,12 @@ local function tmdb_lookup(
     -- Cache hits remain available while HTTP requests are backing off.
     load_poster_cache()
 
-    local cache_title = gsub(title:lower(), '%s+', ' ')
-    cache_title = gsub(cache_title, '^%s+', '')
-    cache_title = gsub(cache_title, '%s+$', '')
-
-    local index_ids = modules.tmdb_index.candidates(title, is_tv)
+    local query_titles = build_query_titles(title, directory_title)
+    local index_ids = collect_index_ids(query_titles, is_tv)
     local preferred_type = is_tv and 'tv' or 'movie'
-    local key = 'show:' .. preferred_type .. '|' .. cache_title
-        .. '|' .. (year or '') .. '|' .. TMDB_LANG
-    -- New index candidates must not inherit a pre-index negative result.
-    if #index_ids > 0 then
-        key = key .. '|export:' .. table.concat(index_ids, ',')
-    end
+    local key, cache_directory = show_cache_key(
+        title, year, preferred_type, directory_title, index_ids
+    )
     local cached = shared.poster_cache[key]
 
     if type(cached) == 'table' and persistent_entry_expired(cached) then
@@ -775,18 +813,22 @@ local function tmdb_lookup(
         cached = nil
     end
 
-    -- Safely migrate positive pre-v5-7 cache entries only when their stored
-    -- media type agrees with this lookup. Old negatives are deliberately not
-    -- reused because they did not distinguish TV from movie.
-    if cached == nil and #index_ids == 0 then
-        local legacy_key = 'show:' .. cache_title
+    -- A prior positive entry is safe to migrate only when no distinct
+    -- directory context contributed to this lookup. Negative entries are not
+    -- migrated because the query candidates and Unicode matching changed.
+    if cached == nil and cache_directory == '' then
+        local old_title = normalize_match_title(title)
+        local old_key = 'show:' .. preferred_type .. '|' .. old_title
             .. '|' .. (year or '') .. '|' .. TMDB_LANG
-        local legacy_cached = shared.poster_cache[legacy_key]
-        local legacy_hit = unpack_cache_entry(legacy_cached)
-        if legacy_hit and legacy_hit.type == preferred_type then
-            cached = legacy_cached
-            remember_poster(key, legacy_cached)
-            log_verbose('migrated legacy show cache entry to media-typed key')
+        if #index_ids > 0 then
+            old_key = old_key .. '|export:' .. table.concat(index_ids, ',')
+        end
+        local old_cached = shared.poster_cache[old_key]
+        local old_hit = unpack_cache_entry(old_cached)
+        if old_hit and old_hit.type == preferred_type then
+            cached = old_cached
+            remember_poster(key, old_cached)
+            log_verbose('migrated compatible show cache entry to v3 key')
         end
     end
 
@@ -795,7 +837,7 @@ local function tmdb_lookup(
         return nil
     end
     if type(cached) == 'table' and cached.negative then
-        if cached.cache_version ~= 2 then
+        if cached.cache_version ~= SHOW_CACHE_VERSION then
             shared.poster_cache[key] = nil
             shared.poster_cache_dirty = true
             schedule_poster_cache_save()
@@ -813,15 +855,6 @@ local function tmdb_lookup(
     local hit = unpack_cache_entry(cached)
 
     if not hit then
-        local query_titles = { title }
-        if directory_title and directory_title ~= '' then
-            local same = normalize_match_title(directory_title)
-                == normalize_match_title(title)
-            if not same then
-                query_titles[#query_titles + 1] = directory_title
-            end
-        end
-
         local pool = {}
         local seen = {}
         local any_request_ok = false
@@ -897,8 +930,17 @@ local function tmdb_lookup(
             -- search than with several individual detail requests.
             if complete and #verified == 1 then
                 local item = verified[1]
-                if modules.tmdb_index.matches(title, item.title or item.name)
-                    or modules.tmdb_index.matches(title, item.original_title or item.original_name) then
+                local indexed_title_match = false
+                for i = 1, #query_titles do
+                    if modules.tmdb_index.matches(
+                            query_titles[i], item.title or item.name)
+                        or modules.tmdb_index.matches(
+                            query_titles[i], item.original_title or item.original_name) then
+                        indexed_title_match = true
+                        break
+                    end
+                end
+                if indexed_title_match then
                     tmdb_add_candidates(pool, seen, verified, preferred_type, 'local-export')
                     any_request_ok = true
                     score_primary(true)
@@ -976,7 +1018,7 @@ local function tmdb_lookup(
         if #pool == 0 then
             if shared.tmdb_failed_generation == lookup_token then return nil end
             remember_poster(key, {
-                negative = true, cache_version = 2,
+                negative = true, cache_version = SHOW_CACHE_VERSION,
                 expires_at = time() + TMDB_NEGATIVE_CACHE_TTL
             })
             log_verbose('TMDb no candidates after staged search')
@@ -1172,6 +1214,8 @@ return {
     _test = {
         format_episode_title = format_episode_title,
         title_similarity = title_similarity,
+        build_query_titles = build_query_titles,
+        show_cache_key = show_cache_key,
     },
 }
 end
