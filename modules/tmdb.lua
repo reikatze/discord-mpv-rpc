@@ -733,19 +733,31 @@ end
 
 local SHOW_CACHE_VERSION = 3
 
-local function build_query_titles(title, directory_title)
+local function build_query_candidates(title, directory_title)
     local values, seen = {}, {}
-    local function add(value)
+    local function add(value, source)
         local normalized = normalize_match_title(value)
         if normalized == '' or seen[normalized] then return end
         seen[normalized] = true
-        values[#values + 1] = value
+        values[#values + 1] = {title = value, source = source}
     end
-    add(title)
-    add(leading_bracket_alternative(title))
-    add(directory_title)
-    add(leading_bracket_alternative(directory_title))
+    add(title, 'filename')
+    add(leading_bracket_alternative(title), 'filename-bracket')
+    add(directory_title, 'directory')
+    add(leading_bracket_alternative(directory_title), 'directory-bracket')
     return values
+end
+
+local function candidate_titles(query_candidates)
+    local values = {}
+    for i = 1, #query_candidates do
+        values[i] = query_candidates[i].title
+    end
+    return values
+end
+
+local function build_query_titles(title, directory_title)
+    return candidate_titles(build_query_candidates(title, directory_title))
 end
 
 local function collect_index_ids(query_titles, is_tv)
@@ -798,7 +810,8 @@ local function tmdb_lookup(
     -- Cache hits remain available while HTTP requests are backing off.
     load_poster_cache()
 
-    local query_titles = build_query_titles(title, directory_title)
+    local query_candidates = build_query_candidates(title, directory_title)
+    local query_titles = candidate_titles(query_candidates)
     local index_ids = collect_index_ids(query_titles, is_tv)
     local preferred_type = is_tv and 'tv' or 'movie'
     local key, cache_directory = show_cache_key(
@@ -901,6 +914,45 @@ local function tmdb_lookup(
             return outcome
         end
 
+        local function add_multi_query(query_title, source_name)
+            if cancelled() then return 'cancelled' end
+            local results, outcome =
+                tmdb_search_multi_candidates(query_title, lookup_token)
+            if outcome == 'cancelled' then return outcome end
+            if outcome == 'ok' then
+                any_request_ok = true
+                tmdb_add_candidates(
+                    pool, seen, results, preferred_type, source_name .. '-multi'
+                )
+            end
+            return outcome
+        end
+
+        local function run_tv_stage(search_year)
+            for i = 1, #query_candidates do
+                local candidate = query_candidates[i]
+                local suffix = search_year and '-tv-year' or '-tv'
+                local outcome = add_tv_query(
+                    candidate.title, search_year, candidate.source .. suffix
+                )
+                if outcome == 'cancelled' then return outcome end
+                if score_primary(true) then return 'confident' end
+            end
+            return 'ok'
+        end
+
+        local function run_multi_stage()
+            for i = 1, #query_candidates do
+                local candidate = query_candidates[i]
+                local outcome = add_multi_query(
+                    candidate.title, candidate.source
+                )
+                if outcome == 'cancelled' then return outcome end
+                if score_primary(true) then return 'confident' end
+            end
+            return 'ok'
+        end
+
         -- Verify a unique indexed title before taking the shortcut. The
         -- export has no reliable year/artwork/episode data, so details remain
         -- authoritative. Duplicate titles use the normal search instead.
@@ -949,65 +1001,25 @@ local function tmdb_lookup(
         end
 
         if is_tv and not confident then
-            -- Stage 1: one dedicated TV search using the strongest context.
-            -- Straightforward shows such as Dragon Ball DAIMA can stop here.
-            local outcome = add_tv_query(
-                title, year, year and 'filename-tv-year' or 'filename-tv'
-            )
+            -- Search every distinct title candidate in priority order. A
+            -- confident result stops the stage immediately, so common shows
+            -- still need only one request.
+            local outcome = run_tv_stage(year)
             if outcome == 'cancelled' then return nil end
-            score_primary(true)
 
-            -- Stage 2: only search a distinct directory title if the first
-            -- search was not already decisive.
-            if not confident and #query_titles > 1 then
-                outcome = add_tv_query(
-                    query_titles[2], year,
-                    year and 'directory-tv-year' or 'directory-tv'
-                )
-                if outcome == 'cancelled' then return nil end
-                score_primary(true)
-            end
-
-            -- Stage 3: if the year-filtered searches were not decisive,
-            -- broaden to unfiltered TV search results. This remains cheaper
-            -- than doing every search eagerly on every new show.
+            -- If exact-year searches remain weak, retry the same ordered
+            -- candidates without a year before broadening to /search/multi.
             if not confident and year then
-                outcome = add_tv_query(title, nil, 'filename-tv')
+                outcome = run_tv_stage(nil)
                 if outcome == 'cancelled' then return nil end
-                if #query_titles > 1 then
-                    outcome = add_tv_query(query_titles[2], nil, 'directory-tv')
-                    if outcome == 'cancelled' then return nil end
-                end
-                score_primary(true)
             end
-
-            -- Stage 4: retain /search/multi as a last inexpensive candidate
-            -- expansion before the more expensive alternate-title fan-out.
             if not confident then
-                if cancelled() then return nil end
-                local results, multi_outcome =
-                    tmdb_search_multi_candidates(title, lookup_token)
-                if multi_outcome == 'cancelled' then return nil end
-                if multi_outcome == 'ok' then
-                    any_request_ok = true
-                    tmdb_add_candidates(
-                        pool, seen, results, preferred_type, 'filename-multi'
-                    )
-                    score_primary(true)
-                end
+                outcome = run_multi_stage()
+                if outcome == 'cancelled' then return nil end
             end
         elseif not confident then
-            -- Movies continue to use one multi-search first.
-            local results, outcome =
-                tmdb_search_multi_candidates(title, lookup_token)
+            local outcome = run_multi_stage()
             if outcome == 'cancelled' then return nil end
-            if outcome == 'ok' then
-                any_request_ok = true
-                tmdb_add_candidates(
-                    pool, seen, results, preferred_type, 'filename-multi'
-                )
-                score_primary(true)
-            end
         end
 
         if cancelled() then return nil end
