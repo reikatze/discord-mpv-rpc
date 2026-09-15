@@ -444,7 +444,7 @@ package.loaded['socket.unix'] = saved_socket_unix_loaded
 -- rejected current payload retries once; a late rejection for an older payload
 -- is ignored.
 local saved_mp = mp
-local event_handlers, property_handlers, presence_timers = {}, {}, {}
+local event_handlers, property_handlers, key_handlers, presence_timers = {}, {}, {}, {}
 local presence_properties = {
     ['media-title'] = 'Activity A',
     ['time-pos'] = 10,
@@ -469,18 +469,23 @@ mp = {
     end,
     register_event = function(name, fn) event_handlers[name] = fn end,
     observe_property = function(name, _, fn) property_handlers[name] = fn end,
-    add_key_binding = noop,
+    add_key_binding = function(_, name, fn) key_handlers[name] = fn end,
     osd_message = noop,
 }
 local presence_sends = {}
+local presence_activities = {}
+local presence_close_count = 0
 local presence_rpc = {
     socket = true,
-    set_activity = function(_, _, context)
+    set_activity = function(_, activity, context)
+        if activity == nil then activity = false end
+        if context == nil then context = false end
+        presence_activities[#presence_activities + 1] = activity
         presence_sends[#presence_sends + 1] = context
         return true, tostring(#presence_sends)
     end,
     handshake = function() return true end,
-    close = noop,
+    close = function() presence_close_count = presence_close_count + 1 end,
     shutdown_fast = noop,
 }
 local presence_shared = {enabled = true, tmdb_lookup_generation = 0}
@@ -540,6 +545,24 @@ presence_rpc.on_error({}, {
     command = 'SET_ACTIVITY', nonce = '3', context = presence_sends[3],
 })
 equal(#presence_timers, timers_before_second_error, 'Discord rejection retries once')
+
+-- Toggling bypasses the event-coalescing timer. Turning presence off sends the
+-- clear command immediately and keeps IPC open long enough for Discord to
+-- process it; turning it back on immediately publishes the current activity.
+local sends_before_toggle = #presence_sends
+local timers_before_toggle = #presence_timers
+key_handlers['discord-mpv-rpc-toggle']()
+equal(presence_shared.enabled, false, 'presence toggle disables immediately')
+equal(#presence_sends, sends_before_toggle + 1, 'presence toggle clears immediately')
+equal(presence_activities[#presence_activities], false, 'presence toggle clear payload')
+equal(presence_close_count, 0, 'presence toggle keeps IPC open after clear')
+equal(#presence_timers, timers_before_toggle, 'presence toggle does not wait for refresh timer')
+key_handlers['discord-mpv-rpc-toggle']()
+equal(presence_shared.enabled, true, 'presence toggle enables immediately')
+equal(#presence_sends, sends_before_toggle + 2, 'presence toggle publishes immediately')
+equal(presence_activities[#presence_activities] ~= nil, true,
+    'presence toggle publish payload')
+equal(#presence_timers, timers_before_toggle, 'presence enable does not wait for refresh timer')
 mp = saved_mp
 
 for _,path in ipairs({
