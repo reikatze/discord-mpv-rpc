@@ -334,7 +334,10 @@ mp.add_key_binding(KEY_TOGGLE, 'discord-mpv-rpc-toggle', function()
         stop_rejection_retry()
         stop_reconnect_watchdog()
         if RPC.socket then RPC:set_activity(nil) end
-        RPC:close()
+        -- Keep the IPC connection alive after the clear request. Closing it
+        -- immediately can race Discord before it processes SET_ACTIVITY,
+        -- leaving the old presence visible until Discord notices the closed
+        -- client. Reusing the connection also makes the next toggle instant.
         mp.osd_message('Discord RPC: off')
     end
 end)
