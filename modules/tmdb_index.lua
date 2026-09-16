@@ -47,7 +47,17 @@ return function(modules, shared)
             end
         end)
     end
-    local function load_manifest()
+    local function observe_generation(generation, refresh_current_file)
+        if observed_generation==generation then return end
+        observed_generation=generation
+        if not refresh_current_file then return end
+        mp.add_timeout(0,function()
+            if enabled and modules.metadata and mp.get_property('path') then
+                modules.metadata.lookup_poster()
+            end
+        end)
+    end
+    local function load_manifest(refresh_current_file)
         if not enabled then return nil end
         if mp.get_time() < next_read then return manifest end
         next_read = mp.get_time() + 10
@@ -73,14 +83,11 @@ return function(modules, shared)
         if value.generation==bad_generation then manifest=nil;launch();return nil end
         if not verified then manifest=nil;launch();return nil end
         manifest=value
-        if observed_generation~=value.generation then
-            observed_generation=value.generation
-            mp.add_timeout(0,function()
-                if enabled and modules.metadata and mp.get_property('path') then
-                    modules.metadata.lookup_poster()
-                end
-            end)
-        end
+        -- A lookup that discovers the current generation already uses that
+        -- index, so restarting it would only abort its own curl request. The
+        -- periodic watcher still refreshes the active file when a generation
+        -- appears or changes in the background.
+        observe_generation(value.generation, refresh_current_file==true)
         return manifest
     end
     local function corrupt()
@@ -168,9 +175,14 @@ return function(modules, shared)
     mp.register_script_message('discord-mpv-rpc-toggle-db',toggle)
     mp.add_timeout(2,launch)
     mp.add_periodic_timer(60,function()
-        if enabled then pcall(load_manifest);launch() end
+        if enabled then pcall(load_manifest,true);launch() end
     end)
-    return {candidates = candidates, candidates_many = candidates_many, matches = function(a, b)
-        return type(b) == 'string' and normalize(a) ~= '' and normalize(a) == normalize(b)
-    end}
+    return {
+        candidates = candidates,
+        candidates_many = candidates_many,
+        matches = function(a, b)
+            return type(b) == 'string' and normalize(a) ~= '' and normalize(a) == normalize(b)
+        end,
+        _test = {observe_generation = observe_generation},
+    }
 end
