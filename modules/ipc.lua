@@ -580,6 +580,10 @@ local function prune_pending(self)
 end
 
 function RPC:drain_frames()
+    -- Expire unanswered commands even while the connection is otherwise
+    -- quiet. Previously the early return for an empty receive buffer skipped
+    -- pruning until another command or complete frame arrived.
+    prune_pending(self)
     -- Bound work per callback; preserve fragmented headers and bodies.
     for _ = 1, 64 do
         if #self.rx_buffer < 8 then return true end
