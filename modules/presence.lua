@@ -346,6 +346,10 @@ if shared.enabled then
     mp.add_timeout(1.5, function()
         if not shared.enabled then return end
         load_poster_cache()
+        -- file-loaded may already have connected and published the current
+        -- activity. Do not reset its signature and send the same payload a
+        -- second time when the delayed startup task runs.
+        if RPC.socket then return end
         if RPC:handshake() then
             reset_presence_state()
             shared.tick(true)

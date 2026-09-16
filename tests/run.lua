@@ -134,8 +134,16 @@ equal(title_normalize.normalize_index('Tom & Jerry'), 'tom jerry',
     'bundled index normalization compatibility')
 
 local tmdb_factory = assert(loadfile(root .. '/modules/tmdb.lua'))()
+local tmdb_match_factory = assert(loadfile(root .. '/modules/tmdb_match.lua'))()
+local tmdb_episode_factory = assert(loadfile(root .. '/modules/tmdb_episode.lua'))()
 local noop = function() end
-local tmdb = tmdb_factory({
+local function create_tmdb(modules, shared)
+    modules.tmdb_match = tmdb_match_factory(modules, shared)
+    modules.tmdb_episode = tmdb_episode_factory(modules, shared)
+    return tmdb_factory(modules, shared), modules
+end
+local tmdb_shared = {poster_cache = {}, tmdb_lookup_generation = 1}
+local tmdb, tmdb_modules = create_tmdb({
     cache = {
         TMDB_NEGATIVE_CACHE_TTL = 1,
         load_poster_cache = noop,
@@ -169,7 +177,7 @@ local tmdb = tmdb_factory({
         matches = function(a, b) return a == b end,
     },
     title_normalize = title_normalize,
-}, {poster_cache = {}, tmdb_lookup_generation = 1})
+}, tmdb_shared)
 
 equal(tmdb._test.format_episode_title(4, 20, 'Chatty'),
     '04 of 20: Chatty', 'episode total formatting')
@@ -179,6 +187,86 @@ equal(tmdb._test.title_similarity('Dune', 'Dune: Part Two') > 0.7,
     true, 'subtitle similarity')
 equal(tmdb._test.title_similarity('攻殻機動隊', '攻殻機動隊'), 1,
     'Unicode title similarity')
+
+-- Change 6: matching and episode enrichment remain independently testable
+-- after being extracted from the TMDb orchestration module.
+equal(tmdb_modules.tmdb_match.candidate_is_safe_early_stop({
+    id = 1, poster_path = '/poster.jpg', media_type = 'movie',
+    title = 'Target', release_date = '2010-01-01',
+}, 100, nil, '2020'), false, 'wrong-year candidate is not an early stop')
+local match_resolver = tmdb_modules.tmdb_match.new_resolver({
+    alternative_titles = function() return {}, 'ok' end,
+    lookup_cancelled = function() return false end,
+})
+local matched_candidate, matched_score = match_resolver.choose_from_pool({
+    {
+        id = 1, media_type = 'movie', title = 'Unrelated',
+        release_date = '2020-01-01', poster_path = '/wrong.jpg',
+    },
+    {
+        id = 2, media_type = 'movie', title = 'Target',
+        release_date = '2020-01-01', poster_path = '/target.jpg',
+    },
+}, {'Target'}, '2020', false, false, 1)
+equal(matched_candidate.id, 2, 'extracted matcher selects the best candidate')
+equal(matched_score >= tmdb_modules.tmdb_match.MIN_MATCH_SCORE, true,
+    'extracted matcher returns a confident score')
+
+local episode_requests = {}
+local episode_shared = {poster_cache = {}, tmdb_lookup_generation = 1}
+local episode_modules = {
+    cache = {
+        persistent_entry_expired = function() return false end,
+        remember_poster = function(key, value)
+            episode_shared.poster_cache[key] = value
+        end,
+        schedule_poster_cache_save = noop,
+    },
+    config = {
+        TMDB_EPISODE_LOOKUP = true,
+        TMDB_KEY = 'test-key',
+        TMDB_LANG = 'en-US',
+        TMDB_POSITIVE_CACHE_TTL = 60,
+    },
+    helpers = {
+        format = string.format,
+        log_info = noop,
+        log_verbose = noop,
+        log_warn = noop,
+        time = function() return 1000 end,
+    },
+    http = {url_encode = function(value) return tostring(value) end},
+    tmdb_requests = {
+        tmdb_get_json_cached = function(url)
+            episode_requests[#episode_requests + 1] = url
+            if url:find('/episode/4?', 1, true) then
+                return {
+                    id = 400, season_number = 1, episode_number = 4,
+                    name = 'Chatty', still_path = '/chatty.jpg',
+                }, 'ok'
+            end
+            return {
+                season_number = 1,
+                episodes = {{}, {}, {}, {}, {}},
+            }, 'ok'
+        end,
+        tmdb_lookup_cancelled = function() return false end,
+    },
+}
+local episode_module = tmdb_episode_factory(episode_modules, episode_shared)
+equal(episode_module.persistent_key(20, 1, 4), 'episode:20:S01E04:en-US',
+    'extracted episode module owns language-aware cache keys')
+local episode_base_hit = {
+    id = 20, type = 'tv', title = 'Target Show',
+    poster = '/show.jpg', url = 'https://www.themoviedb.org/tv/20',
+}
+local episode_hit = episode_module.apply_episode(episode_base_hit, 1, 4, 1)
+equal(episode_hit.episode, '04 of 5: Chatty', 'episode module display title')
+equal(episode_hit.poster:find('/chatty.jpg', 1, true) ~= nil, true,
+    'episode module still image')
+equal(#episode_requests, 2, 'episode module request count')
+episode_module.apply_episode(episode_base_hit, 1, 4, 1)
+equal(#episode_requests, 2, 'episode module persistent cache reuse')
 local bracket_queries = tmdb._test.build_query_titles(
     '[MysteryGroup] Show Name', nil)
 equal(#bracket_queries, 2, 'ambiguous bracket query count')
@@ -193,12 +281,15 @@ equal(plain_key ~= directory_key, true, 'directory-aware show cache key')
 equal(plain_key:match('^show:v3|') ~= nil, true, 'show cache schema marker')
 
 local function staged_tmdb(responder, request_log)
-    return tmdb_factory({
+    local shared = {poster_cache = {}, tmdb_lookup_generation = 1}
+    local modules = {
         cache = {
             TMDB_NEGATIVE_CACHE_TTL = 1,
             load_poster_cache = noop,
             persistent_entry_expired = function() return false end,
-            remember_poster = noop,
+            remember_poster = function(key, value)
+                shared.poster_cache[key] = value
+            end,
             schedule_poster_cache_save = noop,
         },
         config = {
@@ -236,7 +327,8 @@ local function staged_tmdb(responder, request_log)
             end,
         },
         title_normalize = title_normalize,
-    }, {poster_cache = {}, tmdb_lookup_generation = 1})
+    }
+    return create_tmdb(modules, shared), shared
 end
 
 local movie_requests = {}
@@ -274,6 +366,36 @@ equal(tv_requests[3]:find('query=Target Show&page', 1, true) ~= nil, true,
     'TV directory fallback searched')
 equal(tv_requests[3]:find('first_air_date_year=2020', 1, true) ~= nil, true,
     'TV directory fallback preserves year filter')
+
+-- Change 1: a weak result is cached using the active show-cache schema. Repeating the
+-- same lookup must not repeat the staged search and alternative-title request.
+local rejected_requests = {}
+local rejected_tmdb, rejected_shared = staged_tmdb(function(url)
+    if url:find('/alternative_titles?', 1, true) then
+        return {titles = {}}, 'ok'
+    end
+    return {results = {{
+        id = 30, media_type = 'movie', title = 'Unrelated Result',
+        release_date = '2020-01-01', poster_path = nil,
+    }}}, 'ok'
+end, rejected_requests)
+equal(rejected_tmdb.tmdb_lookup(
+    'Target', '2020', false, nil, nil, nil, 1), nil,
+    'weak TMDb result rejected')
+local rejected_request_count = #rejected_requests
+local rejected_key = rejected_tmdb._test.show_cache_key(
+    'Target', '2020', 'movie', nil, {})
+equal(rejected_shared.poster_cache[rejected_key].cache_version, 3,
+    'rejected TMDb result uses current cache schema')
+equal(rejected_shared.poster_cache[rejected_key].negative, true,
+    'rejected TMDb result is stored as a negative cache entry')
+equal(rejected_shared.poster_cache[rejected_key].expires_at, 1001,
+    'rejected TMDb result receives the configured cache lifetime')
+equal(rejected_tmdb.tmdb_lookup(
+    'Target', '2020', false, nil, nil, nil, 1), nil,
+    'cached weak TMDb result remains rejected')
+equal(#rejected_requests, rejected_request_count,
+    'cached weak TMDb result avoids repeat requests')
 
 local cache_factory = assert(loadfile(root .. '/modules/cache.lua'))()
 local cache = cache_factory({
@@ -437,6 +559,15 @@ parsed_rpc_response = {nonce = ack_nonce}
 test_rpc.rx_buffer = le32(1) .. le32(2) .. '{}'
 equal(test_rpc:drain_frames(), true, 'Discord response frame drain')
 equal(rpc_ack_context.activity_sig, 'activity-b', 'Discord response nonce context')
+-- Change 5: pruning must run even when Discord sends no frames, and must not
+-- discard commands that are still within the response window.
+test_rpc.pending.stale = {sent_at = 0}
+test_rpc.pending.fresh = {sent_at = 90}
+test_rpc.rx_buffer = ''
+equal(test_rpc:drain_frames(), true, 'quiet Discord connection frame drain')
+equal(test_rpc.pending.stale, nil, 'quiet Discord connection prunes stale command')
+equal(test_rpc.pending.fresh ~= nil, true,
+    'quiet Discord connection retains fresh command')
 package.preload['socket.unix'] = saved_socket_unix_preload
 package.loaded['socket.unix'] = saved_socket_unix_loaded
 
@@ -475,6 +606,8 @@ mp = {
 local presence_sends = {}
 local presence_activities = {}
 local presence_close_count = 0
+local presence_handshake_count = 0
+local presence_cache_load_count = 0
 local presence_rpc = {
     socket = true,
     set_activity = function(_, activity, context)
@@ -484,14 +617,22 @@ local presence_rpc = {
         presence_sends[#presence_sends + 1] = context
         return true, tostring(#presence_sends)
     end,
-    handshake = function() return true end,
+    handshake = function()
+        presence_handshake_count = presence_handshake_count + 1
+        return true
+    end,
     close = function() presence_close_count = presence_close_count + 1 end,
     shutdown_fast = noop,
 }
 local presence_shared = {enabled = true, tmdb_lookup_generation = 0}
 assert(assert(loadfile(root .. '/modules/presence.lua'))()({
     artwork = {presence_image = function(value) return value or 'fallback' end},
-    cache = {load_poster_cache = noop, save_poster_cache = noop},
+    cache = {
+        load_poster_cache = function()
+            presence_cache_load_count = presence_cache_load_count + 1
+        end,
+        save_poster_cache = noop,
+    },
     config = {
         ACTIVITY_WATCHING = 3,
         FALLBACK_IMG = 'fallback', FALLBACK_TXT = 'fallback',
@@ -522,6 +663,20 @@ end
 equal(refresh_count, 1, 'presence event burst coalescing')
 first_refresh.fn()
 equal(#presence_sends, 1, 'coalesced presence send count')
+local startup_timer
+for _, timer in ipairs(presence_timers) do
+    if timer.delay == 1.5 then startup_timer = timer; break end
+end
+local sends_before_startup_timer = #presence_sends
+startup_timer.fn()
+-- Change 2: file-loaded may already have connected and sent presence before
+-- the delayed startup callback fires. It may load cache, but must not reconnect
+-- or publish the same activity again.
+equal(presence_cache_load_count, 1, 'startup timer still loads poster cache')
+equal(presence_handshake_count, 0,
+    'startup timer skips handshake when Discord is already connected')
+equal(#presence_sends, sends_before_startup_timer,
+    'startup timer skips duplicate connected presence')
 local old_context = presence_sends[1]
 presence_properties['media-title'] = 'Activity B'
 event_handlers['playback-restart']()
@@ -579,7 +734,9 @@ for _,path in ipairs({
     'modules/metadata.lua',
     'modules/presence.lua',
     'modules/tmdb.lua',
+    'modules/tmdb_episode.lua',
     'modules/tmdb_index.lua',
+    'modules/tmdb_match.lua',
     'modules/tmdb_requests.lua',
     'modules/title_normalize.lua',
     'tools/gzip.lua',
