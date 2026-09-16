@@ -578,6 +578,7 @@ local saved_mp = mp
 local event_handlers, property_handlers, key_handlers, presence_timers = {}, {}, {}, {}
 local presence_properties = {
     ['media-title'] = 'Activity A',
+    ['demuxer-via-network'] = false,
     ['time-pos'] = 10,
     duration = 100,
     speed = 1,
@@ -608,6 +609,9 @@ local presence_activities = {}
 local presence_close_count = 0
 local presence_handshake_count = 0
 local presence_cache_load_count = 0
+local presence_lookup_count = 0
+local presence_abort_count = 0
+local presence_clear_title_count = 0
 local presence_rpc = {
     socket = true,
     set_activity = function(_, activity, context)
@@ -649,8 +653,19 @@ assert(assert(loadfile(root .. '/modules/presence.lua'))()({
         truncate_utf8 = function(value) return value end,
     },
     ipc = {RPC = presence_rpc, rpc_backoff_active = function() return false end},
-    metadata = {clear_title_state = noop, lookup_poster = noop},
-    tmdb_requests = {tmdb_abort_inflight_requests = noop},
+    metadata = {
+        clear_title_state = function()
+            presence_clear_title_count = presence_clear_title_count + 1
+        end,
+        lookup_poster = function()
+            presence_lookup_count = presence_lookup_count + 1
+        end,
+    },
+    tmdb_requests = {
+        tmdb_abort_inflight_requests = function()
+            presence_abort_count = presence_abort_count + 1
+        end,
+    },
 }, presence_shared))
 property_handlers.pause(nil, true)
 property_handlers.speed(nil, 2)
@@ -718,6 +733,45 @@ equal(#presence_sends, sends_before_toggle + 2, 'presence toggle publishes immed
 equal(presence_activities[#presence_activities] ~= nil, true,
     'presence toggle publish payload')
 equal(#presence_timers, timers_before_toggle, 'presence enable does not wait for refresh timer')
+
+-- Network-backed media is ignored. Loading a stream clears any activity left
+-- by the previous local file, skips metadata lookup, and suppresses subsequent
+-- event, startup, and toggle-driven publishes until a local file is loaded.
+local sends_before_stream = #presence_sends
+local lookups_before_stream = presence_lookup_count
+local aborts_before_stream = presence_abort_count
+local clears_before_stream = presence_clear_title_count
+presence_properties['demuxer-via-network'] = true
+event_handlers['file-loaded']()
+equal(#presence_sends, sends_before_stream + 1, 'stream load clears prior presence')
+equal(presence_activities[#presence_activities], false, 'stream clear payload')
+equal(presence_lookup_count, lookups_before_stream, 'stream skips metadata lookup')
+equal(presence_abort_count, aborts_before_stream + 1, 'stream aborts stale TMDb work')
+equal(presence_clear_title_count, clears_before_stream + 1, 'stream clears title state')
+
+event_handlers['playback-restart']()
+local stream_refresh = presence_timers[#presence_timers]
+stream_refresh.fn()
+equal(#presence_sends, sends_before_stream + 1, 'stream playback event stays ignored')
+
+local handshake_before_stream_startup = presence_handshake_count
+startup_timer.fn()
+equal(presence_handshake_count, handshake_before_stream_startup,
+    'stream startup skips Discord handshake')
+equal(#presence_sends, sends_before_stream + 1, 'stream startup stays ignored')
+
+key_handlers['discord-mpv-rpc-toggle']()
+equal(presence_shared.enabled, false, 'stream toggle disables')
+equal(#presence_sends, sends_before_stream + 2, 'stream disable clears presence')
+key_handlers['discord-mpv-rpc-toggle']()
+equal(presence_shared.enabled, true, 'stream toggle enables')
+equal(#presence_sends, sends_before_stream + 2, 'stream enable remains unpublished')
+
+presence_properties['demuxer-via-network'] = false
+event_handlers['file-loaded']()
+equal(presence_lookup_count, lookups_before_stream + 1,
+    'local file resumes metadata lookup')
+equal(#presence_sends, sends_before_stream + 3, 'local file resumes presence')
 mp = saved_mp
 
 for _,path in ipairs({
