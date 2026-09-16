@@ -50,6 +50,13 @@ local function tmdb_get_json(url, inflight)
         end,
     })
 
+    -- Aborting an obsolete lookup makes curl return without an HTTP status.
+    -- That is expected cancellation, not a network failure, so handle it
+    -- before interpreting curl's status/result.
+    if inflight and inflight.cancelled then
+        return nil, 'cancelled'
+    end
+
     if status == 429 then
         tmdb_backoff_until = mp.get_time() + tmdb_backoff_sec
         log_warn('TMDb 429, backing off ' .. tmdb_backoff_sec .. 's')

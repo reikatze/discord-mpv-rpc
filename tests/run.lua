@@ -397,6 +397,103 @@ equal(rejected_tmdb.tmdb_lookup(
 equal(#rejected_requests, rejected_request_count,
     'cached weak TMDb result avoids repeat requests')
 
+-- An intentionally aborted stale curl request is cancellation, not a
+-- transport failure. It must not emit the status=0 warning seen during the
+-- superseded startup lookup.
+local request_warnings = {}
+local aborted_request_handle
+local request_outcome
+local tmdb_requests_factory =
+    assert(loadfile(root .. '/modules/tmdb_requests.lua'))()
+local saved_abort_async_command = mp.abort_async_command
+mp.abort_async_command = function(handle)
+    aborted_request_handle = handle
+end
+local request_shared = {}
+local requests = tmdb_requests_factory({
+    helpers = {
+        format = string.format,
+        log_error = noop,
+        log_verbose = noop,
+        log_warn = function(message)
+            request_warnings[#request_warnings + 1] = message
+        end,
+        parse_json = function() return {} end,
+        resume_co = coroutine.resume,
+        running_co = coroutine.running,
+        trim_memory_cache = noop,
+        yield_co = coroutine.yield,
+    },
+    http = {
+        curl_get = function(_, control)
+            control.on_async_handle('curl-handle')
+            coroutine.yield()
+            control.on_async_complete('curl-handle')
+            return nil, 0, true
+        end,
+    },
+}, request_shared)
+local request_co = coroutine.create(function()
+    local _, outcome = requests.tmdb_get_json_cached(
+        'https://api.themoviedb.org/3/search/movie', 0)
+    request_outcome = outcome
+end)
+equal(coroutine.resume(request_co), true, 'TMDb request starts')
+requests.tmdb_abort_inflight_requests()
+equal(aborted_request_handle, 'curl-handle', 'stale curl request aborted')
+equal(coroutine.resume(request_co), true, 'aborted TMDb request resumes')
+equal(request_outcome, 'cancelled', 'aborted TMDb request outcome')
+equal(#request_warnings, 0, 'aborted TMDb request has no transport warning')
+mp.abort_async_command = saved_abort_async_command
+
+-- Discovering an index generation inside the current lookup must not restart
+-- that lookup. A generation noticed by the periodic watcher still refreshes
+-- the active file because it may have appeared after the original lookup.
+local saved_index_mp = mp
+local index_timers = {}
+local index_lookup_count = 0
+mp = {
+    add_key_binding = noop,
+    add_periodic_timer = function() return {kill = noop} end,
+    add_timeout = function(delay, fn)
+        index_timers[#index_timers + 1] = {delay = delay, fn = fn}
+        return {kill = noop}
+    end,
+    command_native_async = noop,
+    get_property = function() return '/media/Test.mkv' end,
+    get_time = function() return 100 end,
+    osd_message = noop,
+    register_script_message = noop,
+}
+local tmdb_index_factory = assert(loadfile(root .. '/modules/tmdb_index.lua'))()
+local index = tmdb_index_factory({
+    config = {
+        KEY_TOGGLE_DB = '', TMDB_LOCAL_INDEX = true,
+        TMDB_INDEX_MPV_PATH = '', utils = {},
+    },
+    helpers = {
+        SCRIPT_DIR = root,
+        log_warn = noop,
+        parse_json = function() return nil end,
+    },
+    metadata = {
+        lookup_poster = function()
+            index_lookup_count = index_lookup_count + 1
+        end,
+    },
+    title_normalize = title_normalize,
+}, {})
+local timers_before_generation = #index_timers
+index._test.observe_generation('generation-a', false)
+equal(#index_timers, timers_before_generation,
+    'active lookup does not restart on first index generation')
+index._test.observe_generation('generation-b', true)
+equal(#index_timers, timers_before_generation + 1,
+    'background index generation schedules refresh')
+index_timers[#index_timers].fn()
+equal(index_lookup_count, 1, 'background index generation refreshes active file')
+mp = saved_index_mp
+
 local cache_factory = assert(loadfile(root .. '/modules/cache.lua'))()
 local cache = cache_factory({
     config = {IS_WINDOWS = false, PATH_SEP = '/', PID = 1, CACHE_PATH = '/tmp/test-cache'},
