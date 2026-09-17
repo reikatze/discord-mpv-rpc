@@ -46,7 +46,7 @@ end
 --   .../scripts/discord-mpv-rpc/discord-mpv-rpc-posters.json
 ----------------------------------------------------------------
 local function get_script_dir()
-    local script_dir = mp.get_script_directory()
+    local script_dir = shared.script_dir or mp.get_script_directory()
     if script_dir and script_dir ~= '' then
         return script_dir
     end

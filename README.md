@@ -189,11 +189,24 @@ Run mpv from a terminal or enable verbose logging for more detail.
 
 ## Tests
 
-Run the pure-Lua checks from the installed script directory:
+Run the pure-Lua checks with a standalone Lua interpreter:
 
 ```sh
 lua tests/run.lua
 ```
+
+The mpv suite runs those checks under mpv's real LuaJIT runtime, then tests
+script startup, headless playback events, scene/movie filename parsing, and the
+Rich Presence toggle binding:
+
+```sh
+tests/run-mpv-tests.sh --mpv /path/to/mpv --media /path/to/video.mp4
+```
+
+For a dynamically linked portable mpv, add `--lib-dir /path/to/libraries`.
+The same paths can be supplied through `MPV_BIN`, `MPV_TEST_MEDIA`, and
+`MPV_LIBRARY_PATH`. Tests disable TMDb networking and local-index maintenance,
+use temporary symlinks instead of copying the video, and do not require Discord.
 
 ## Credits
 
