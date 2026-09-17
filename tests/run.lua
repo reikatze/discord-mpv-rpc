@@ -452,6 +452,7 @@ mp.abort_async_command = saved_abort_async_command
 local saved_index_mp = mp
 local index_timers = {}
 local index_lookup_count = 0
+local index_worker_launch_count = 0
 mp = {
     add_key_binding = noop,
     add_periodic_timer = function() return {kill = noop} end,
@@ -459,7 +460,9 @@ mp = {
         index_timers[#index_timers + 1] = {delay = delay, fn = fn}
         return {kill = noop}
     end,
-    command_native_async = noop,
+    command_native_async = function()
+        index_worker_launch_count = index_worker_launch_count + 1
+    end,
     get_property = function() return '/media/Test.mkv' end,
     get_time = function() return 100 end,
     osd_message = noop,
@@ -469,7 +472,7 @@ local tmdb_index_factory = assert(loadfile(root .. '/modules/tmdb_index.lua'))()
 local index = tmdb_index_factory({
     config = {
         KEY_TOGGLE_DB = '', TMDB_LOCAL_INDEX = true,
-        TMDB_INDEX_MPV_PATH = '', utils = {},
+        TMDB_INDEX_MPV_PATH = '', TMDB_KEY = '', utils = {},
     },
     helpers = {
         SCRIPT_DIR = root,
@@ -483,6 +486,15 @@ local index = tmdb_index_factory({
     },
     title_normalize = title_normalize,
 }, {})
+equal(index._test.maintenance_enabled(), false,
+    'index maintenance disabled without TMDb API key')
+for _, timer in ipairs(index_timers) do
+    if timer.delay == 2 then
+        timer.fn()
+    end
+end
+equal(index_worker_launch_count, 0,
+    'startup timer does not launch index maintenance without TMDb API key')
 local timers_before_generation = #index_timers
 index._test.observe_generation('generation-a', false)
 equal(#index_timers, timers_before_generation,

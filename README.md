@@ -149,6 +149,10 @@ When `tmdb_local_index=yes`, a detached mpv worker performs quick index checks a
 - corrupted
 - at least seven days old
 
+A structurally valid active index remains available for lookups while an old
+snapshot is refreshed. Automatic maintenance does not start until a TMDb API
+key is configured.
+
 The updater is pure Lua and uses mpv, LuaJIT, and the existing `curl` executable; no Python, database engine, or unzip tool is required. Playback, cached results, and online TMDb searches continue while maintenance runs. Completed indexes are picked up automatically. Downloaded exports and inactive index generations are removed after successful validation.
 
 Set `tmdb_local_index=no` to disable both lookup and automatic maintenance. `Ctrl+D` toggles them for the current session without rewriting the configuration; it does not stop a worker already running.
@@ -200,13 +204,18 @@ script startup, headless playback events, scene/movie filename parsing, and the
 Rich Presence toggle binding:
 
 ```sh
-tests/run-mpv-tests.sh --mpv /path/to/mpv --media /path/to/video.mp4
+tests/run-mpv-tests.sh --mpv /path/to/mpv --media /path/to/video.mp4 \
+  --database /path/to/db/tmdb
 ```
 
 For a dynamically linked portable mpv, add `--lib-dir /path/to/libraries`.
 The same paths can be supplied through `MPV_BIN`, `MPV_TEST_MEDIA`, and
 `MPV_LIBRARY_PATH`. Tests disable TMDb networking and local-index maintenance,
 use temporary symlinks instead of copying the video, and do not require Discord.
+When `ffmpeg` and a test database are available, the suite also verifies a real
+network stream and a read-only lookup against the existing TMDb index. Set
+`FFMPEG_BIN` and `MPV_TEST_DATABASE` instead of the corresponding command-line
+options if preferred.
 
 ## Credits
 
