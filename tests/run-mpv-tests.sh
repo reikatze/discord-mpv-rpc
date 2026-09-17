@@ -7,10 +7,12 @@ root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 mpv_bin=${MPV_BIN:-}
 media_file=${MPV_TEST_MEDIA:-}
 library_dir=${MPV_LIBRARY_PATH:-}
+database_dir=${MPV_TEST_DATABASE:-}
+ffmpeg_bin=${FFMPEG_BIN:-}
 
 usage() {
     cat <<'EOF'
-Usage: tests/run-mpv-tests.sh [--mpv PATH] [--media PATH] [--lib-dir PATH]
+Usage: tests/run-mpv-tests.sh [options]
 
 Runs the unit and integration suites inside a real mpv LuaJIT runtime.
 
@@ -19,6 +21,10 @@ Options:
   --media PATH    local video used for playback tests (or set MPV_TEST_MEDIA)
   --lib-dir PATH  directory containing private shared libraries
                   (or set MPV_LIBRARY_PATH)
+  --database PATH TMDb index directory containing current.json
+                  (or set MPV_TEST_DATABASE)
+  --ffmpeg PATH   ffmpeg executable for the live-stream test
+                  (or set FFMPEG_BIN)
 EOF
 }
 
@@ -34,6 +40,14 @@ while (($#)); do
             ;;
         --lib-dir)
             library_dir=${2:?missing value for --lib-dir}
+            shift 2
+            ;;
+        --database)
+            database_dir=${2:?missing value for --database}
+            shift 2
+            ;;
+        --ffmpeg)
+            ffmpeg_bin=${2:?missing value for --ffmpeg}
             shift 2
             ;;
         -h|--help)
@@ -91,6 +105,29 @@ if [[ -n $library_dir ]]; then
     export LD_LIBRARY_PATH="$library_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
+if [[ -z $database_dir ]]; then
+    for candidate in \
+        "$root_dir/db/tmdb" \
+        "$root_dir/../../Discord MPV Tracker Database/tmdb"; do
+        if [[ -f $candidate/current.json ]]; then
+            database_dir=$candidate
+            break
+        fi
+    done
+fi
+if [[ -n $database_dir && ! -f $database_dir/current.json ]]; then
+    printf 'TMDb test database does not contain current.json: %s\n' "$database_dir" >&2
+    exit 2
+fi
+
+if [[ -z $ffmpeg_bin ]]; then
+    ffmpeg_bin=$(command -v ffmpeg || true)
+fi
+if [[ -n $ffmpeg_bin && ! -x $ffmpeg_bin ]]; then
+    printf 'ffmpeg is not executable: %s\n' "$ffmpeg_bin" >&2
+    exit 2
+fi
+
 test_tmp=$(mktemp -d "${TMPDIR:-/tmp}/discord-mpv-rpc-tests.XXXXXX")
 trap 'rm -rf -- "$test_tmp"' EXIT
 
@@ -98,6 +135,7 @@ scene_media="$test_tmp/[Judas] Dragon Ball Daima - S01E04v2.mkv"
 movie_media="$test_tmp/Birdman (or the Unexpected Virtue of Ignorance) (2014) 1080p BluRay.mkv"
 ln -s -- "$media_file" "$scene_media"
 ln -s -- "$media_file" "$movie_media"
+ln -s -- "$script_dir/mpv/fake-curl.sh" "$test_tmp/curl"
 
 common=(
     --no-config
@@ -113,6 +151,7 @@ main_options=(
 )
 
 passed=0
+skipped=0
 run_case() {
     local name=$1
     local marker=$2
@@ -182,4 +221,59 @@ run_case presence-toggle MPV_TEST_TOGGLE_OK \
     --script="$script_dir/mpv/probe.lua" \
     --script-opts-append=mpv-rpc-test-mode=toggle
 
-printf 'ok - %d mpv test cases\n' "$passed"
+if [[ -n $ffmpeg_bin ]]; then
+    stream_port=${MPV_TEST_STREAM_PORT:-$((38000 + $$ % 1000))}
+    stream_log="$test_tmp/stream.log"
+    stream_server_log="$test_tmp/stream-server.log"
+    stream_curl_log="$test_tmp/stream-curl.log"
+    printf 'test: %-28s ' live-network-stream
+    "$ffmpeg_bin" -hide_banner -loglevel error -re -stream_loop -1 \
+        -i "$media_file" -map 0:v:0 -c:v copy -an -f mpegts -listen 1 \
+        "http://127.0.0.1:$stream_port" >"$stream_server_log" 2>&1 &
+    stream_server_pid=$!
+    sleep 0.5
+    if ! PATH="$test_tmp:$PATH" MPV_TEST_CURL_LOG="$stream_curl_log" \
+        "$mpv_bin" "${common[@]}" \
+        --length=2 \
+        --script="$root_dir/main.lua" \
+        --script="$script_dir/mpv/probe.lua" \
+        --script-opts=discord-mpv-rpc-enabled=yes,discord-mpv-rpc-tmdb_local_index=no,discord-mpv-rpc-tmdb_api_key=stream-test-key \
+        --script-opts-append=mpv-rpc-test-mode=stream \
+        "http://127.0.0.1:$stream_port/live.ts" >"$stream_log" 2>&1; then
+        kill "$stream_server_pid" 2>/dev/null || true
+        wait "$stream_server_pid" 2>/dev/null || true
+        printf 'FAIL\n' >&2
+        sed -n '1,240p' "$stream_log" >&2
+        sed -n '1,120p' "$stream_server_log" >&2
+        exit 1
+    fi
+    kill "$stream_server_pid" 2>/dev/null || true
+    wait "$stream_server_pid" 2>/dev/null || true
+    if grep -Eq 'MPV_TEST_FAILURE|Lua error|stack traceback|cannot load .+\.lua|Discord unavailable|connected to Discord' "$stream_log" \
+        || ! grep -Fq MPV_TEST_STREAM_OK "$stream_log" \
+        || [[ -s $stream_curl_log ]]; then
+        printf 'FAIL\n' >&2
+        sed -n '1,240p' "$stream_log" >&2
+        sed -n '1,120p' "$stream_server_log" >&2
+        exit 1
+    fi
+    printf 'ok\n'
+    passed=$((passed + 1))
+else
+    printf 'test: %-28s skip (ffmpeg not found)\n' live-network-stream
+    skipped=$((skipped + 1))
+fi
+
+if [[ -n $database_dir ]]; then
+    run_case local-database MPV_TEST_DATABASE_OK \
+        --idle=yes \
+        --script="$script_dir/mpv/database_probe.lua" \
+        --script-opts="mpv-rpc-db-test-database=$database_dir"
+else
+    printf 'test: %-28s skip (set --database)\n' local-database
+    skipped=$((skipped + 1))
+fi
+
+printf 'ok - %d mpv test cases' "$passed"
+if ((skipped > 0)); then printf ' (%d skipped)' "$skipped"; fi
+printf '\n'

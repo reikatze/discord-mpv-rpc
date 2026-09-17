@@ -1,11 +1,17 @@
 -- Optional disk-backed TMDb export index. No full export is loaded into Lua.
 return function(modules, shared)
     local root = modules.helpers.SCRIPT_DIR .. '/db/tmdb/'
+    if modules.config.TMDB_INDEX_ROOT and modules.config.TMDB_INDEX_ROOT ~= '' then
+        root = modules.config.TMDB_INDEX_ROOT
+        if root:sub(-1) ~= '/' and root:sub(-1) ~= '\\' then root = root .. '/' end
+    end
     local parse_json = modules.helpers.parse_json
     local normalize = modules.title_normalize.normalize_index
     local tools_dir = modules.helpers.SCRIPT_DIR .. '/tools/'
     local health = assert(loadfile(tools_dir .. 'index_health.lua'))()(modules.config.utils)
     local enabled = modules.config.TMDB_LOCAL_INDEX ~= false
+    local has_api_key = modules.config.TMDB_KEY ~= nil
+        and modules.config.TMDB_KEY ~= ''
     local manifest, bad_generation, observed_generation
     local next_launch, next_read = 0, 0
     local FULL_CHECK_INTERVAL = 24*60*60
@@ -18,7 +24,7 @@ return function(modules, shared)
         )
     end
     local function launch()
-        if not enabled or mp.get_time() < next_launch then return end
+        if not enabled or not has_api_key or mp.get_time() < next_launch then return end
         next_launch = mp.get_time() + 3600
         local checked,due=pcall(maintenance_due)
         if checked and not due then return end
@@ -62,7 +68,7 @@ return function(modules, shared)
         if mp.get_time() < next_read then return manifest end
         next_read = mp.get_time() + 10
         local value = health.load(root)
-        if not value or health.stale(value) or not health.sizes(root,value) then
+        if not value or not health.sizes(root,value) then
             manifest=nil
             launch()
             return nil
@@ -83,6 +89,10 @@ return function(modules, shared)
         if value.generation==bad_generation then manifest=nil;launch();return nil end
         if not verified then manifest=nil;launch();return nil end
         manifest=value
+        -- Freshness determines when maintenance runs, not whether a known-good
+        -- index can answer lookups. Keep using the active generation while a
+        -- stale snapshot is refreshed in the detached worker.
+        if health.stale(value) then launch() end
         -- A lookup that discovers the current generation already uses that
         -- index, so restarting it would only abort its own curl request. The
         -- periodic watcher still refreshes the active file when a generation
@@ -183,6 +193,9 @@ return function(modules, shared)
         matches = function(a, b)
             return type(b) == 'string' and normalize(a) ~= '' and normalize(a) == normalize(b)
         end,
-        _test = {observe_generation = observe_generation},
+        _test = {
+            maintenance_enabled = function() return enabled and has_api_key end,
+            observe_generation = observe_generation,
+        },
     }
 end

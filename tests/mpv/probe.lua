@@ -89,18 +89,33 @@ if o.mode == 'idle' then
 elseif o.mode == 'toggle' then
     mp.add_timeout(0.1, guarded(function()
         check_runtime()
+        local found = false
+        for _, binding in ipairs(mp.get_property_native('input-bindings') or {}) do
+            local command = type(binding) == 'table' and binding.cmd or nil
+            if type(command) == 'string'
+                and command:find('/discord%-mpv%-rpc%-toggle') then
+                found = true
+                break
+            end
+        end
+        check(found, 'Discord Rich Presence toggle binding is not registered')
         mp.commandv('script-binding', 'main/discord-mpv-rpc-toggle')
         mp.commandv('script-binding', 'main/discord-mpv-rpc-toggle')
         msg.info('MPV_TEST_TOGGLE_OK')
         mp.commandv('quit', 0)
     end))
-elseif o.mode == 'playback' or o.mode == 'filename' then
+elseif o.mode == 'playback' or o.mode == 'filename' or o.mode == 'stream' then
     mp.register_event('file-loaded', guarded(function()
         check_runtime()
         saw_file_loaded = true
         check(type(mp.get_property('path')) == 'string', 'path is unavailable')
-        check((mp.get_property_number('duration') or 0) > 0,
-            'media duration is unavailable')
+        if o.mode == 'stream' then
+            check(mp.get_property_bool('demuxer-via-network') == true,
+                'mpv did not identify the test media as a network stream')
+        else
+            check((mp.get_property_number('duration') or 0) > 0,
+                'media duration is unavailable')
+        end
         if o.mode == 'filename' then check_filename() end
     end))
     mp.register_event('end-file', guarded(function()
@@ -114,6 +129,8 @@ elseif o.mode == 'playback' or o.mode == 'filename' then
             msg.error('MPV_TEST_FAILURE end-file was not observed')
         elseif o.mode == 'filename' then
             msg.info('MPV_TEST_FILENAME_OK')
+        elseif o.mode == 'stream' then
+            msg.info('MPV_TEST_STREAM_OK')
         else
             msg.info('MPV_TEST_PLAYBACK_OK')
         end
