@@ -7,7 +7,7 @@ if not script_dir or script_dir == '' then
 end
 local sep = package.config:sub(1, 1)
 local modules = {}
-local state = {}
+local state = {script_dir = script_dir}
 
 local function load_module(name)
     local path = script_dir .. sep .. 'modules' .. sep .. name .. '.lua'
