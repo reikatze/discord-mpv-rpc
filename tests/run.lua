@@ -27,14 +27,30 @@ for _, name in ipairs({'mp.utils', 'mp.msg', 'mp.options'}) do
     package.loaded[name] = nil
 end
 local configured_cache_path = ''
+local configured_ignored_paths = '[]'
 local expand_path_calls = 0
+local config_warning_count = 0
 package.preload['mp.utils'] = function()
-    return {getpid = function() return 123 end}
+    return {
+        getpid = function() return 123 end,
+        parse_json = function(value)
+            if value == '[]' then return {} end
+            if value == '[" /media/private/ "," /media/one.mkv "," ~~/secret "]' then
+                return {' /media/private/ ', ' /media/one.mkv ', ' ~~/secret '}
+            end
+            if value == '["/"]' then return {'/'} end
+            if value == '[1]' then return {1} end
+            return nil
+        end,
+    }
 end
-package.preload['mp.msg'] = function() return {} end
+package.preload['mp.msg'] = function()
+    return {warn = function() config_warning_count = config_warning_count + 1 end}
+end
 package.preload['mp.options'] = function()
     return {read_options = function(options)
         options.cache_path = configured_cache_path
+        options.ignored_paths = configured_ignored_paths
     end}
 end
 local saved_command_native = mp.command_native
@@ -51,6 +67,37 @@ local custom_config = config_factory({}, {})
 equal(custom_config.CACHE_PATH, '/expanded/~~/custom-cache.json',
     'custom cache path expansion')
 equal(expand_path_calls, 1, 'custom cache path expansion count')
+configured_cache_path = ''
+configured_ignored_paths = '[" /media/private/ "," /media/one.mkv "," ~~/secret "]'
+local ignored_config = config_factory({}, {})
+equal(ignored_config.is_ignored_path('/media/private/movie.mkv'), true,
+    'ignored directory descendant')
+equal(ignored_config.is_ignored_path('/media/private'), true,
+    'ignored directory itself')
+equal(ignored_config.is_ignored_path('/media/private-old/movie.mkv'), false,
+    'ignored directory path boundary')
+equal(ignored_config.is_ignored_path('/media/one.mkv'), true,
+    'ignored exact file')
+equal(ignored_config.is_ignored_path('/media/one.mkv.backup'), false,
+    'ignored exact file path boundary')
+equal(ignored_config.is_ignored_path('~~/secret/episode.mkv'), true,
+    'ignored mpv-prefixed path')
+equal(ignored_config.is_ignored_path('https://example.test/video.mkv'), false,
+    'ignored paths do not match URLs')
+configured_ignored_paths = '["/"]'
+local ignored_root_config = config_factory({}, {})
+equal(ignored_root_config.is_ignored_path('/other-root/file.mkv'), true,
+    'ignored filesystem root includes descendants')
+configured_ignored_paths = '{"path":"/media/private"}'
+local invalid_ignored_config = config_factory({}, {})
+equal(invalid_ignored_config.is_ignored_path('/media/private/movie.mkv'), false,
+    'invalid ignored path JSON is disabled')
+equal(config_warning_count, 1, 'invalid ignored path JSON warning')
+configured_ignored_paths = '[1]'
+local nonstring_ignored_config = config_factory({}, {})
+equal(nonstring_ignored_config.is_ignored_path('/media/private/movie.mkv'), false,
+    'non-string ignored path entry is disabled')
+equal(config_warning_count, 2, 'non-string ignored path warning')
 mp.command_native = saved_command_native
 for _, name in ipairs({'mp.utils', 'mp.msg', 'mp.options'}) do
     package.preload[name] = saved_preload[name]
@@ -686,6 +733,7 @@ package.loaded['socket.unix'] = saved_socket_unix_loaded
 local saved_mp = mp
 local event_handlers, property_handlers, key_handlers, presence_timers = {}, {}, {}, {}
 local presence_properties = {
+    path = '/media/regular.mkv',
     ['media-title'] = 'Activity A',
     ['demuxer-via-network'] = false,
     ['time-pos'] = 10,
@@ -750,6 +798,9 @@ assert(assert(loadfile(root .. '/modules/presence.lua'))()({
         ACTIVITY_WATCHING = 3,
         FALLBACK_IMG = 'fallback', FALLBACK_TXT = 'fallback',
         KEY_TOGGLE = 'D', SMALL_IDLE = '', SMALL_PAUSE = '', SMALL_PLAY = '',
+        is_ignored_path = function(path)
+            return path == '/media/private/ignored.mkv'
+        end,
     },
     filename = {meaningful_chapter_title = noop, tagged_title = noop},
     helpers = {
@@ -859,8 +910,8 @@ equal(presence_abort_count, aborts_before_stream + 1, 'stream aborts stale TMDb 
 equal(presence_clear_title_count, clears_before_stream + 1, 'stream clears title state')
 
 event_handlers['playback-restart']()
-local stream_refresh = presence_timers[#presence_timers]
-stream_refresh.fn()
+equal(#presence_timers, timers_before_second_error,
+    'stream playback event schedules no work')
 equal(#presence_sends, sends_before_stream + 1, 'stream playback event stays ignored')
 
 local handshake_before_stream_startup = presence_handshake_count
@@ -881,6 +932,43 @@ event_handlers['file-loaded']()
 equal(presence_lookup_count, lookups_before_stream + 1,
     'local file resumes metadata lookup')
 equal(#presence_sends, sends_before_stream + 3, 'local file resumes presence')
+
+-- Configured paths follow the same exclusion lifecycle as streams: the old
+-- activity is cleared, no metadata or event work starts, and a later ordinary
+-- file resumes normal handling.
+local sends_before_ignored = #presence_sends
+local lookups_before_ignored = presence_lookup_count
+local aborts_before_ignored = presence_abort_count
+local clears_before_ignored = presence_clear_title_count
+presence_properties.path = '/media/private/ignored.mkv'
+event_handlers['file-loaded']()
+equal(#presence_sends, sends_before_ignored + 1,
+    'ignored file load clears prior presence')
+equal(presence_activities[#presence_activities], false,
+    'ignored file clear payload')
+equal(presence_lookup_count, lookups_before_ignored,
+    'ignored file skips metadata lookup')
+equal(presence_abort_count, aborts_before_ignored + 1,
+    'ignored file aborts stale TMDb work')
+equal(presence_clear_title_count, clears_before_ignored + 1,
+    'ignored file clears title state')
+local timers_before_ignored_event = #presence_timers
+event_handlers['playback-restart']()
+equal(#presence_timers, timers_before_ignored_event,
+    'ignored file playback event schedules no work')
+local handshakes_before_ignored_startup = presence_handshake_count
+startup_timer.fn()
+equal(presence_handshake_count, handshakes_before_ignored_startup,
+    'ignored file startup skips Discord handshake')
+equal(#presence_sends, sends_before_ignored + 1,
+    'ignored file startup remains unpublished')
+
+presence_properties.path = '/media/regular.mkv'
+event_handlers['file-loaded']()
+equal(presence_lookup_count, lookups_before_ignored + 1,
+    'ordinary file resumes metadata after ignored file')
+equal(#presence_sends, sends_before_ignored + 2,
+    'ordinary file resumes presence after ignored file')
 mp = saved_mp
 
 for _,path in ipairs({

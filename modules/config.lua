@@ -8,7 +8,6 @@ local msg   = require 'mp.msg'
 local opts  = require 'mp.options'
 
 local DEFAULT_CLIENT_ID = string.char(49, 53, 52, 54, 49, 51, 52, 48, 55, 52, 56, 56, 50, 55, 56, 57, 52, 52, 54)
-
 local o = {
     client_id       = DEFAULT_CLIENT_ID,
     large_image          = 'mpv',
@@ -27,6 +26,7 @@ local o = {
     tmdb_index_mpv_path = '',
     cache_path      = '',
     tmdb_positive_cache_days = 60,
+    ignored_paths   = '[]',
 }
 opts.read_options(o, 'discord-mpv-rpc')
 
@@ -50,6 +50,84 @@ local POSTER_FIT   = o.poster_fit or 'contain'
 local PID          = utils.getpid()
 local IS_WINDOWS   = package.config:sub(1, 1) == '\\'
 local PATH_SEP     = package.config:sub(1, 1)
+
+local function trim(value)
+    return value:match('^%s*(.-)%s*$')
+end
+
+local function normalize_local_path(path)
+    if type(path) ~= 'string' or path == ''
+        or path:match('^[%a][%w+.-]*://') then
+        return nil
+    end
+
+    local ok, expanded = pcall(mp.command_native, {'expand-path', path})
+    if ok and type(expanded) == 'string' and expanded ~= '' then
+        path = expanded
+    end
+
+    local absolute = path:match('^[/\\]') or path:match('^%a:[/\\]')
+    if not absolute then
+        local working_directory = mp.get_property('working-directory')
+        if working_directory and working_directory ~= '' then
+            path = working_directory .. PATH_SEP .. path
+        end
+    end
+
+    local unc = path:match('^[/\\][/\\]') ~= nil
+    path = path:gsub('\\', '/'):gsub('/+', '/')
+    if unc then path = '/' .. path end
+    while #path > 1 and path:sub(-1) == '/' and not path:match('^%a:/$') do
+        path = path:sub(1, -2)
+    end
+    if IS_WINDOWS then path = path:lower() end
+    return path
+end
+
+local ignored_paths = {}
+local ignored_paths_json = trim(tostring(o.ignored_paths or ''))
+if ignored_paths_json == '' then ignored_paths_json = '[]' end
+local parsed_ignored_paths
+if ignored_paths_json:match('^%[') and ignored_paths_json:match('%]%s*$') then
+    local ok, value = pcall(utils.parse_json, ignored_paths_json)
+    if ok and type(value) == 'table' then parsed_ignored_paths = value end
+end
+local valid_ignored_paths = parsed_ignored_paths ~= nil
+if valid_ignored_paths then
+    local entry_count, highest_index = 0, 0
+    for key, entry in pairs(parsed_ignored_paths) do
+        if type(key) ~= 'number' or key < 1 or key % 1 ~= 0
+            or type(entry) ~= 'string' then
+            valid_ignored_paths = false
+            break
+        end
+        entry_count = entry_count + 1
+        highest_index = math.max(highest_index, key)
+    end
+    if highest_index ~= entry_count then valid_ignored_paths = false end
+end
+if not valid_ignored_paths then
+    msg.warn('ignored_paths must be a JSON array of strings; ignoring the option')
+else
+    for _, entry in ipairs(parsed_ignored_paths) do
+        local normalized = normalize_local_path(trim(entry))
+        if normalized then ignored_paths[#ignored_paths + 1] = normalized end
+    end
+end
+
+local function is_ignored_path(path)
+    local normalized = normalize_local_path(path)
+    if not normalized then return false end
+    for _, ignored in ipairs(ignored_paths) do
+        local prefix = ignored:sub(-1) == '/' and ignored or ignored .. '/'
+        if normalized == ignored
+            or normalized:sub(1, #prefix) == prefix then
+            return true
+        end
+    end
+    return false
+end
+
 local cache_path = o.cache_path
 local expanded_cache_path = nil
 if cache_path and cache_path ~= '' then
@@ -82,6 +160,7 @@ return {
     TMDB_INDEX_MPV_PATH = o.tmdb_index_mpv_path,
     CACHE_PATH = expanded_cache_path,
     TMDB_POSITIVE_CACHE_TTL = positive_cache_days * 24 * 60 * 60,
+    is_ignored_path = is_ignored_path,
     msg = msg,
     utils = utils,
 }

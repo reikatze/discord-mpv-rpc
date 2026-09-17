@@ -3,6 +3,7 @@
 return function(modules, shared)
 local probe_wsrv = modules.artwork.probe_wsrv
 local TMDB_KEY = modules.config.TMDB_KEY
+local is_ignored_path = modules.config.is_ignored_path
 local clean_filename = modules.filename.clean_filename
 local directory_context = modules.filename.directory_context
 local format = modules.helpers.format
@@ -46,6 +47,7 @@ local function lookup_poster()
 
     local path = get_property('path')
     if not path then return end
+    if is_ignored_path and is_ignored_path(path) then return end
 
     local title, year, is_tv, season, ep = clean_filename(path)
     local directory_title = nil

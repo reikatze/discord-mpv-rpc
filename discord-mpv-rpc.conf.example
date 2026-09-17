@@ -77,3 +77,9 @@ poster_fit=contain
 
 # Start with Rich Presence enabled. Press key_toggle to change at runtime.
 enabled=yes
+
+# Optional JSON array of files or directories to ignore completely. Directory
+# entries include every file below them. Absolute paths and mpv path prefixes
+# such as ~~/ are supported. Use forward slashes for Windows paths.
+# Example: ["~~/watch-later/private","C:/Media/Home Videos","/mnt/media/test.mkv"]
+ignored_paths=[]
