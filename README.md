@@ -99,8 +99,24 @@ With a custom application, optionally upload square Rich Presence assets named `
 | `small_image_idle` | `mpv` | Idle badge asset key; empty hides it |
 | `poster_fit` | `contain` | `contain` letterboxes artwork through wsrv.nl; `raw` uses the TMDb URL directly |
 | `enabled` | `yes` | Enables Rich Presence at startup |
+| `ignored_paths` | `[]` | JSON array of files or directories excluded from all Rich Presence and metadata handling |
 
 Restart mpv after editing the configuration file.
+
+To exclude private media, test clips, or a complete directory tree, provide a
+JSON array of paths:
+
+```ini
+ignored_paths=["~~/watch-later/private","/mnt/media/home-videos","/mnt/media/test.mkv"]
+```
+
+File entries match that exact file. Directory entries also match every file
+below the directory. Absolute paths and mpv path prefixes such as `~~/` are
+supported; relative paths are resolved against mpv's working directory.
+Use forward slashes for Windows paths, for example `C:/Media/Private`, to avoid
+JSON backslash escaping. Invalid JSON is ignored with a warning in mpv's log.
+Ignored media clears any previous Discord activity and does not trigger
+metadata lookup, TMDb requests, presence updates, or reconnection attempts.
 
 ## What Discord displays
 

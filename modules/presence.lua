@@ -8,6 +8,7 @@ local ACTIVITY_WATCHING = modules.config.ACTIVITY_WATCHING
 local FALLBACK_IMG = modules.config.FALLBACK_IMG
 local FALLBACK_TXT = modules.config.FALLBACK_TXT
 local KEY_TOGGLE = modules.config.KEY_TOGGLE
+local is_ignored_path = modules.config.is_ignored_path
 local SMALL_IDLE = modules.config.SMALL_IDLE
 local SMALL_PAUSE = modules.config.SMALL_PAUSE
 local SMALL_PLAY = modules.config.SMALL_PLAY
@@ -52,7 +53,7 @@ local timestamps = { start = 0, ['end'] = 0 }
 local reconnect_timer = nil
 local rejection_retry_timer = nil
 local last_rejected_sig = nil
-local ignoring_stream = false
+local ignoring_media = false
 
 local function stop_reconnect_watchdog()
     if reconnect_timer then
@@ -62,7 +63,7 @@ local function stop_reconnect_watchdog()
 end
 
 local function start_reconnect_watchdog()
-    if reconnect_timer or not shared.enabled or ignoring_stream then return end
+    if reconnect_timer or not shared.enabled or ignoring_media then return end
 
     reconnect_timer = mp.add_periodic_timer(1, function()
         if not shared.enabled then
@@ -93,7 +94,7 @@ local function playback_state_label(idle, paused, buffering)
 end
 
 shared.tick = function(force)
-    if not shared.enabled or ignoring_stream then return end
+    if not shared.enabled or ignoring_media then return end
 
     local raw_title = get_property('media-title') or get_property('filename') or 'Unknown'
     local title = shared.current_tmdb_title or tagged_title() or shared.current_clean_title or raw_title
@@ -233,6 +234,7 @@ local function cancel_presence_refresh()
 end
 
 local function schedule_presence_refresh(force)
+    if ignoring_media then return end
     presence_refresh_force=presence_refresh_force or force==true
     if presence_refresh_timer then return end
     presence_refresh_timer=mp.add_timeout(PRESENCE_REFRESH_DELAY,function()
@@ -261,8 +263,10 @@ mp.register_event('file-loaded', function()
     cancel_presence_refresh()
     reset_presence_state()
 
-    ignoring_stream = get_property_bool('demuxer-via-network') == true
-    if ignoring_stream then
+    local path = get_property('path')
+    ignoring_media = get_property_bool('demuxer-via-network') == true
+        or (is_ignored_path and is_ignored_path(path)) == true
+    if ignoring_media then
         tmdb_abort_inflight_requests()
         shared.tmdb_lookup_generation = shared.tmdb_lookup_generation + 1
         clear_title_state()
@@ -276,8 +280,8 @@ mp.register_event('file-loaded', function()
 end)
 
 mp.register_event('end-file', function()
-    local ignored_stream = ignoring_stream
-    ignoring_stream = false
+    local ignored_media = ignoring_media
+    ignoring_media = false
     cancel_presence_refresh()
     tmdb_abort_inflight_requests()
     shared.tmdb_lookup_generation = shared.tmdb_lookup_generation + 1
@@ -288,7 +292,7 @@ mp.register_event('end-file', function()
         if not RPC:set_activity(nil) then
             start_reconnect_watchdog()
         end
-    elseif shared.enabled and not ignored_stream then
+    elseif shared.enabled and not ignored_media then
         start_reconnect_watchdog()
     end
 end)
@@ -339,7 +343,7 @@ mp.add_key_binding(KEY_TOGGLE, 'discord-mpv-rpc-toggle', function()
     if shared.enabled then
         reset_presence_state()
         shared.tick(true)
-        if not ignoring_stream and not RPC.socket then
+        if not ignoring_media and not RPC.socket then
             start_reconnect_watchdog()
         end
         mp.osd_message('Discord RPC: on')
@@ -360,7 +364,7 @@ if shared.enabled then
     mp.add_timeout(1.5, function()
         if not shared.enabled then return end
         load_poster_cache()
-        if ignoring_stream then return end
+        if ignoring_media then return end
         -- file-loaded may already have connected and published the current
         -- activity. Do not reset its signature and send the same payload a
         -- second time when the delayed startup task runs.

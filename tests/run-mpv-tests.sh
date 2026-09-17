@@ -128,14 +128,19 @@ if [[ -n $ffmpeg_bin && ! -x $ffmpeg_bin ]]; then
     exit 2
 fi
 
-test_tmp=$(mktemp -d "${TMPDIR:-/tmp}/discord-mpv-rpc-tests.XXXXXX")
+test_tmp=$(mktemp -d "/tmp/discord-mpv-rpc-tests.XXXXXX")
 trap 'rm -rf -- "$test_tmp"' EXIT
 
 scene_media="$test_tmp/[Judas] Dragon Ball Daima - S01E04v2.mkv"
 movie_media="$test_tmp/Birdman (or the Unexpected Virtue of Ignorance) (2014) 1080p BluRay.mkv"
+ignored_media="$test_tmp/ignored/private.mkv"
+mkdir -p "$test_tmp/ignored" "$test_tmp/mpv-config/script-opts"
 ln -s -- "$media_file" "$scene_media"
 ln -s -- "$media_file" "$movie_media"
+ln -s -- "$media_file" "$ignored_media"
 ln -s -- "$script_dir/mpv/fake-curl.sh" "$test_tmp/curl"
+cp -- "$script_dir/mpv/ignored.conf" \
+    "$test_tmp/mpv-config/script-opts/discord-mpv-rpc.conf"
 
 common=(
     --no-config
@@ -214,6 +219,32 @@ run_case movie-filename MPV_TEST_FILENAME_OK \
     --script-opts-append='mpv-rpc-test-expected_title=Birdman (or the Unexpected Virtue of Ignorance)' \
     --script-opts-append=mpv-rpc-test-expected_year=2014 \
     "$movie_media"
+
+ignored_log="$test_tmp/ignored-path.log"
+ignored_curl_log="$test_tmp/ignored-path-curl.log"
+printf 'test: %-28s ' ignored-directory
+if ! PATH="$test_tmp:$PATH" MPV_TEST_CURL_LOG="$ignored_curl_log" \
+    "$mpv_bin" "${common[@]}" \
+    --config-dir="$test_tmp/mpv-config" \
+    --config=yes \
+    --length=2 \
+    --script="$root_dir/main.lua" \
+    --script="$script_dir/mpv/probe.lua" \
+    --script-opts-append=mpv-rpc-test-mode=playback \
+    "$ignored_media" >"$ignored_log" 2>&1; then
+    printf 'FAIL\n' >&2
+    sed -n '1,240p' "$ignored_log" >&2
+    exit 1
+fi
+if grep -Eq 'MPV_TEST_FAILURE|Lua error|stack traceback|cannot load .+\.lua|Discord unavailable|connected to Discord' "$ignored_log" \
+    || ! grep -Fq MPV_TEST_PLAYBACK_OK "$ignored_log" \
+    || [[ -s $ignored_curl_log ]]; then
+    printf 'FAIL\n' >&2
+    sed -n '1,240p' "$ignored_log" >&2
+    exit 1
+fi
+printf 'ok\n'
+passed=$((passed + 1))
 
 run_case presence-toggle MPV_TEST_TOGGLE_OK \
     --idle=yes \
