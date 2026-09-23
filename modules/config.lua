@@ -8,6 +8,10 @@ local msg   = require 'mp.msg'
 local opts  = require 'mp.options'
 
 local DEFAULT_CLIENT_ID = string.char(49, 53, 52, 54, 49, 51, 52, 48, 55, 52, 56, 56, 50, 55, 56, 57, 52, 52, 54)
+local function trim(value)
+    return tostring(value or ''):match('^%s*(.-)%s*$')
+end
+
 local o = {
     client_id       = DEFAULT_CLIENT_ID,
     large_image          = 'mpv',
@@ -30,8 +34,33 @@ local o = {
 }
 opts.read_options(o, 'discord-mpv-rpc')
 
+o.client_id = trim(o.client_id)
 if o.client_id == '' then
     o.client_id = DEFAULT_CLIENT_ID
+elseif not o.client_id:match('^%d+$') then
+    msg.warn('client_id must contain only digits; using the built-in application')
+    o.client_id = DEFAULT_CLIENT_ID
+end
+
+o.tmdb_language = trim(o.tmdb_language)
+if o.tmdb_language == '' then
+    msg.warn('tmdb_language cannot be empty; using en-US')
+    o.tmdb_language = 'en-US'
+end
+
+o.poster_fit = trim(o.poster_fit):lower()
+if o.poster_fit ~= 'contain' and o.poster_fit ~= 'raw' then
+    msg.warn('poster_fit must be contain or raw; using contain')
+    o.poster_fit = 'contain'
+end
+
+local positive_cache_days = tonumber(o.tmdb_positive_cache_days)
+if not positive_cache_days then
+    msg.warn('tmdb_positive_cache_days must be a number; using 60')
+    positive_cache_days = 60
+elseif positive_cache_days < 1 or positive_cache_days > 3650 then
+    msg.warn('tmdb_positive_cache_days must be between 1 and 3650; clamping the value')
+    positive_cache_days = math.max(1, math.min(positive_cache_days, 3650))
 end
 
 local CLIENT_ID    = o.client_id
@@ -46,13 +75,39 @@ local TMDB_LANG    = o.tmdb_language
 local TMDB_EPISODE_LOOKUP = o.tmdb_episode_lookup ~= false
 local KEY_TOGGLE   = o.key_toggle
 shared.enabled      = o.enabled
-local POSTER_FIT   = o.poster_fit or 'contain'
+local POSTER_FIT   = o.poster_fit
 local PID          = utils.getpid()
 local IS_WINDOWS   = package.config:sub(1, 1) == '\\'
 local PATH_SEP     = package.config:sub(1, 1)
 
-local function trim(value)
-    return value:match('^%s*(.-)%s*$')
+local function resolve_dot_segments(path)
+    local prefix, rest, protected_segments = '', path, 0
+    if path:match('^%a:/') then
+        prefix, rest = path:sub(1, 3), path:sub(4)
+    elseif path:sub(1, 2) == '//' then
+        prefix, rest, protected_segments = '//', path:sub(3), 2
+    elseif path:sub(1, 1) == '/' then
+        prefix, rest = '/', path:sub(2)
+    end
+
+    local segments = {}
+    for segment in rest:gmatch('[^/]+') do
+        if segment == '..' then
+            if #segments > protected_segments
+                and segments[#segments] ~= '..' then
+                table.remove(segments)
+            elseif prefix == '' then
+                segments[#segments + 1] = segment
+            end
+        elseif segment ~= '.' then
+            segments[#segments + 1] = segment
+        end
+    end
+
+    local body = table.concat(segments, '/')
+    if prefix == '//' then return prefix .. body end
+    if prefix ~= '' then return prefix .. body end
+    return body == '' and '.' or body
 end
 
 local function normalize_local_path(path)
@@ -77,6 +132,7 @@ local function normalize_local_path(path)
     local unc = path:match('^[/\\][/\\]') ~= nil
     path = path:gsub('\\', '/'):gsub('/+', '/')
     if unc then path = '/' .. path end
+    path = resolve_dot_segments(path)
     while #path > 1 and path:sub(-1) == '/' and not path:match('^%a:/$') do
         path = path:sub(1, -2)
     end
@@ -136,9 +192,6 @@ if cache_path and cache_path ~= '' then
         expanded_cache_path = value
     end
 end
-local positive_cache_days = tonumber(o.tmdb_positive_cache_days) or 60
-positive_cache_days = math.max(1, math.min(positive_cache_days, 3650))
-
 return {
     ACTIVITY_WATCHING = ACTIVITY_WATCHING,
     CLIENT_ID = CLIENT_ID,
