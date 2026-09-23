@@ -168,6 +168,22 @@ return function(modules, shared)
     local function candidates(title,is_tv)
         return candidates_many({title},is_tv)
     end
+    local function status()
+        if not enabled then
+            return {enabled=false, maintenance_enabled=false, available=false}
+        end
+        local value=health.load(root)
+        local sizes_ok=value and health.sizes(root,value) or false
+        local state=value and health.state(root) or nil
+        local rejected=state and state.generation==value.generation
+            and state.valid==false
+        return {
+            enabled=true,
+            maintenance_enabled=has_api_key,
+            available=sizes_ok and not rejected or false,
+            generation=value and value.generation or nil,
+        }
+    end
     local function toggle()
         enabled=not enabled
         manifest=nil;next_read=0
@@ -190,6 +206,7 @@ return function(modules, shared)
     return {
         candidates = candidates,
         candidates_many = candidates_many,
+        status = status,
         matches = function(a, b)
             return type(b) == 'string' and normalize(a) ~= '' and normalize(a) == normalize(b)
         end,

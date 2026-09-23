@@ -18,6 +18,7 @@ local floor = modules.helpers.floor
 local get_property = modules.helpers.get_property
 local get_property_bool = modules.helpers.get_property_bool
 local get_property_number = modules.helpers.get_property_number
+local log_info = modules.helpers.log_info
 local log_warn = modules.helpers.log_warn
 local time = modules.helpers.time
 local truncate_utf8 = modules.helpers.truncate_utf8
@@ -26,6 +27,7 @@ local rpc_backoff_active = modules.ipc.rpc_backoff_active
 local clear_title_state = modules.metadata.clear_title_state
 local lookup_poster = modules.metadata.lookup_poster
 local tmdb_abort_inflight_requests = modules.tmdb_requests.tmdb_abort_inflight_requests
+local tmdb_index_status = modules.tmdb_index and modules.tmdb_index.status
 
 -- Presence updates (event-driven)
 ----------------------------------------------------------------
@@ -337,6 +339,42 @@ mp.register_event('shutdown', function()
     save_poster_cache()
     RPC:shutdown_fast()
 end)
+
+local function show_status()
+    local path = get_property('path')
+    local current_media = 'none'
+    if path then
+        local ignored = ignoring_media
+            or get_property_bool('demuxer-via-network') == true
+            or (is_ignored_path and is_ignored_path(path)) == true
+        current_media = ignored and 'ignored' or 'visible'
+    end
+
+    local index_label = 'unavailable'
+    if tmdb_index_status then
+        local ok, index = pcall(tmdb_index_status)
+        if ok and type(index) == 'table' then
+            if not index.enabled then
+                index_label = 'off'
+            elseif index.available then
+                index_label = 'ready'
+            end
+        end
+    end
+
+    local status = table.concat({
+        'Discord RPC — presence: ' .. (shared.enabled and 'on' or 'off'),
+        'Discord: ' .. (RPC.socket and 'connected' or 'disconnected'),
+        'TMDb: ' .. ((modules.config.TMDB_KEY or '') ~= ''
+            and 'configured' or 'not configured'),
+        'local index: ' .. index_label,
+        'current media: ' .. current_media,
+    }, ' | ')
+    mp.osd_message(status, 5)
+    log_info(status)
+end
+
+mp.register_script_message('discord-mpv-rpc-status', show_status)
 
 mp.add_key_binding(KEY_TOGGLE, 'discord-mpv-rpc-toggle', function()
     shared.enabled = not shared.enabled
