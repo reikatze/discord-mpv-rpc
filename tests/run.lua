@@ -259,6 +259,53 @@ equal(matched_candidate.id, 2, 'extracted matcher selects the best candidate')
 equal(matched_score >= tmdb_modules.tmdb_match.MIN_MATCH_SCORE, true,
     'extracted matcher returns a confident score')
 
+local prepared_normalize_calls, prepared_alias_calls = 0, 0
+local optimized_resolver = tmdb_match_factory({
+    helpers = {
+        format = string.format,
+        log_verbose = noop,
+        match = string.match,
+    },
+    title_normalize = {
+        normalize_match = function(value)
+            prepared_normalize_calls = prepared_normalize_calls + 1
+            return title_normalize.normalize_match(value)
+        end,
+    },
+}, {}).new_resolver({
+    alternative_titles = function(result)
+        prepared_alias_calls = prepared_alias_calls + 1
+        return {'Alias ' .. tostring(result.id), 'Shared Alias'}, 'ok'
+    end,
+    lookup_cancelled = function() return false end,
+})
+local optimized_pool = {
+    {
+        id = 1, media_type = 'movie', title = 'Unrelated',
+        original_title = 'Other', release_date = '2020-01-01',
+        poster_path = '/wrong.jpg',
+    },
+    {
+        id = 2, media_type = 'movie', title = 'Target',
+        original_title = 'Target Original', release_date = '2020-01-01',
+        poster_path = '/target.jpg',
+    },
+}
+local optimized_queries = {'Target', 'Target Original'}
+local optimized_context = optimized_resolver.new_scoring_context(optimized_queries)
+local optimized_candidate, _, optimized_second = optimized_resolver.choose_from_pool(
+    optimized_pool, optimized_queries, '2020', false, true, 1, nil,
+    optimized_context)
+equal(optimized_candidate.id, 2, 'optimized matcher preserves best candidate')
+equal(optimized_second ~= nil, true, 'optimized matcher preserves runner-up score')
+equal(prepared_alias_calls, 2, 'aliases prepared once per candidate')
+equal(prepared_normalize_calls, 10, 'titles normalized once per scoring pass')
+optimized_resolver.choose_from_pool(
+    optimized_pool, optimized_queries, '2020', false, true, 1, nil,
+    optimized_context)
+equal(prepared_alias_calls, 2, 'prepared aliases are reused across scoring passes')
+equal(prepared_normalize_calls, 10, 'prepared titles are reused across scoring passes')
+
 local episode_requests = {}
 local episode_shared = {poster_cache = {}, tmdb_lookup_generation = 1}
 local episode_modules = {
@@ -554,6 +601,7 @@ equal(index_lookup_count, 1, 'background index generation refreshes active file'
 mp = saved_index_mp
 
 local cache_factory = assert(loadfile(root .. '/modules/cache.lua'))()
+local cache_shared = {}
 local cache = cache_factory({
     config = {IS_WINDOWS = false, PATH_SEP = '/', PID = 1, CACHE_PATH = '/tmp/test-cache'},
     helpers = {
@@ -565,11 +613,21 @@ local cache = cache_factory({
         parse_json = function() return {} end,
         time = function() return 1000 end,
     },
-}, {})
+}, cache_shared)
 equal(cache.persistent_entry_expired({expires_at = 999}), true,
     'expired persistent entry')
 equal(cache.persistent_entry_expired({expires_at = 1001}), false,
     'live persistent entry')
+for i = 1, 1001 do
+    cache_shared.poster_cache[string.format('entry-%04d', i)] = {
+        expires_at = 2000 + i,
+    }
+end
+cache._test.trim_poster_cache()
+equal(cache_shared.poster_cache['entry-0001'], nil,
+    'cache evicts the soonest-expiring entry first')
+equal(cache_shared.poster_cache['entry-1001'] ~= nil, true,
+    'cache retains the longest-lived entry')
 
 local gzip_factory = assert(loadfile(root .. '/tools/gzip.lua'))()
 local compressed_seen = false

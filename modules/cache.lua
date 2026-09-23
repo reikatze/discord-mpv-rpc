@@ -144,13 +144,26 @@ local function trim_poster_cache()
     end
     if count <= MAX_CACHE_ENTRIES then return end
 
-    -- JSON object order is intentionally not relied upon; this is a simple
-    -- bounded-cache fallback rather than a full LRU implementation.
+    -- Prefer removing entries that will expire soonest. This preserves the
+    -- longest-lived metadata and avoids turning arbitrary table iteration into
+    -- unnecessary TMDb requests. Keys break equal-expiry ties deterministically.
+    local candidates = {}
+    for key, entry in pairs(shared.poster_cache) do
+        candidates[#candidates + 1] = {
+            key = key,
+            expires_at = type(entry) == 'table'
+                and tonumber(entry.expires_at) or math.huge,
+        }
+    end
+    table.sort(candidates, function(a, b)
+        if a.expires_at == b.expires_at then
+            return tostring(a.key) < tostring(b.key)
+        end
+        return a.expires_at < b.expires_at
+    end)
     local remove = count - MAX_CACHE_ENTRIES
-    for key in pairs(shared.poster_cache) do
-        shared.poster_cache[key] = nil
-        remove = remove - 1
-        if remove <= 0 then break end
+    for i = 1, remove do
+        shared.poster_cache[candidates[i].key] = nil
     end
 end
 
@@ -176,5 +189,8 @@ return {
     remember_poster = remember_poster,
     save_poster_cache = save_poster_cache,
     schedule_poster_cache_save = schedule_poster_cache_save,
+    _test = {
+        trim_poster_cache = trim_poster_cache,
+    },
 }
 end
