@@ -338,6 +338,7 @@ local function tmdb_lookup(
         local any_request_ok = false
         local best, best_score, second_score
         local confident = false
+        local scoring_context = matcher.new_scoring_context(query_titles)
 
         local function cancelled()
             if tmdb_lookup_cancelled(lookup_token) then
@@ -352,7 +353,8 @@ local function tmdb_lookup(
             local outcome
             best, best_score, second_score, _, outcome =
                 tmdb_choose_from_pool(
-                    pool, query_titles, year, is_tv, false, lookup_token
+                    pool, query_titles, year, is_tv, false, lookup_token, nil,
+                    scoring_context
                 )
             if outcome == 'cancelled' then return false end
             if allow_early_stop then
@@ -510,7 +512,8 @@ local function tmdb_lookup(
             local outcome
             best, best_score, second_score, outcome =
                 tmdb_resolve_aliases_tiered(
-                    pool, query_titles, year, is_tv, lookup_token
+                    pool, query_titles, year, is_tv, lookup_token,
+                    scoring_context
                 )
             if outcome == 'cancelled' or cancelled() then
                 return nil
