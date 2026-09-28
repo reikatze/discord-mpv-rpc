@@ -729,6 +729,7 @@ local parsed_rpc_response
 local ipc_factory = assert(loadfile(root .. '/modules/ipc.lua'))()
 local ipc = assert(ipc_factory({
     config = {CLIENT_ID = 'test-client', PID = 123},
+    ipc_transport = {install = function() end},
     helpers = {
         byte = string.byte,
         char = string.char,
@@ -815,6 +816,7 @@ mp = {
         return timer
     end,
     register_event = function(name, fn) event_handlers[name] = fn end,
+    register_script_message = noop,
     observe_property = function(name, _, fn) property_handlers[name] = fn end,
     add_key_binding = function(_, name, fn) key_handlers[name] = fn end,
     osd_message = noop,
@@ -857,7 +859,10 @@ assert(assert(loadfile(root .. '/modules/presence.lua'))()({
         FALLBACK_IMG = 'fallback', FALLBACK_TXT = 'fallback',
         KEY_TOGGLE = 'D', SMALL_IDLE = '', SMALL_PAUSE = '', SMALL_PLAY = '',
         is_ignored_path = function(path)
-            return path == '/media/private/ignored.mkv'
+            return path == '/media/private'
+                or (type(path) == 'string'
+                    and path:sub(1, #'/media/private/') == '/media/private/')
+                or path == '/media/specific.mkv'
         end,
     },
     filename = {meaningful_chapter_title = noop, tagged_title = noop},
@@ -998,7 +1003,23 @@ local sends_before_ignored = #presence_sends
 local lookups_before_ignored = presence_lookup_count
 local aborts_before_ignored = presence_abort_count
 local clears_before_ignored = presence_clear_title_count
+property_handlers.pause(nil, true)
+local pending_refresh = presence_timers[#presence_timers]
 presence_properties.path = '/media/private/ignored.mkv'
+presence_properties['media-title'] = 'private.mkv'
+-- A pending property refresh can run after mpv has switched path but before
+-- file-loaded. It must never send the new filename to Discord.
+pending_refresh.fn()
+equal(#presence_sends, sends_before_ignored,
+    'ignored path blocks a refresh before file-loaded')
+event_handlers['start-file']()
+presence_shared.tick(true)
+equal(#presence_sends, sends_before_ignored,
+    'start-file blocks a direct publish before classification')
+local handshakes_before_ignored_load = presence_handshake_count
+startup_timer.fn()
+equal(presence_handshake_count, handshakes_before_ignored_load,
+    'startup skips handshake while ignored file is loading')
 event_handlers['file-loaded']()
 equal(#presence_sends, sends_before_ignored + 1,
     'ignored file load clears prior presence')
@@ -1022,11 +1043,44 @@ equal(#presence_sends, sends_before_ignored + 1,
     'ignored file startup remains unpublished')
 
 presence_properties.path = '/media/regular.mkv'
+presence_properties['media-title'] = 'Regular'
+event_handlers['start-file']()
 event_handlers['file-loaded']()
 equal(presence_lookup_count, lookups_before_ignored + 1,
     'ordinary file resumes metadata after ignored file')
 equal(#presence_sends, sends_before_ignored + 2,
     'ordinary file resumes presence after ignored file')
+
+-- An exact file entry must be blocked at the same early send boundary as a
+-- directory entry, then resume normally when another file is loaded.
+local sends_before_exact_file = #presence_sends
+local lookups_before_exact_file = presence_lookup_count
+property_handlers.pause(nil, true)
+local pending_exact_file_refresh = presence_timers[#presence_timers]
+presence_properties.path = '/media/specific.mkv'
+presence_properties['media-title'] = 'specific.mkv'
+pending_exact_file_refresh.fn()
+equal(#presence_sends, sends_before_exact_file,
+    'exact ignored file blocks refresh before file-loaded')
+event_handlers['start-file']()
+presence_shared.tick(true)
+equal(#presence_sends, sends_before_exact_file,
+    'exact ignored file blocks direct publish during load')
+event_handlers['file-loaded']()
+equal(#presence_sends, sends_before_exact_file + 1,
+    'exact ignored file only clears prior presence')
+equal(presence_activities[#presence_activities], false,
+    'exact ignored file clear payload')
+equal(presence_lookup_count, lookups_before_exact_file,
+    'exact ignored file skips metadata lookup')
+presence_properties.path = '/media/specific.mkv.backup'
+presence_properties['media-title'] = 'Backup'
+event_handlers['start-file']()
+event_handlers['file-loaded']()
+equal(presence_lookup_count, lookups_before_exact_file + 1,
+    'similar filename is not ignored')
+equal(#presence_sends, sends_before_exact_file + 2,
+    'similar filename resumes presence')
 mp = saved_mp
 
 for _,path in ipairs({

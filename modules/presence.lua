@@ -57,6 +57,12 @@ local rejection_retry_timer = nil
 local last_rejected_sig = nil
 local ignoring_media = false
 
+local function current_media_ignored()
+    local path = get_property('path')
+    return get_property_bool('demuxer-via-network') == true
+        or (is_ignored_path and is_ignored_path(path)) == true
+end
+
 local function stop_reconnect_watchdog()
     if reconnect_timer then
         reconnect_timer:kill()
@@ -65,7 +71,8 @@ local function stop_reconnect_watchdog()
 end
 
 local function start_reconnect_watchdog()
-    if reconnect_timer or not shared.enabled or ignoring_media then return end
+    if reconnect_timer or not shared.enabled or ignoring_media
+        or current_media_ignored() then return end
 
     reconnect_timer = mp.add_periodic_timer(1, function()
         if not shared.enabled then
@@ -96,7 +103,10 @@ local function playback_state_label(idle, paused, buffering)
 end
 
 shared.tick = function(force)
-    if not shared.enabled or ignoring_media then return end
+    -- mpv may change path/title and fire property callbacks before file-loaded.
+    -- Check the live path at the send boundary so that no early callback can
+    -- expose the filename of an ignored file.
+    if not shared.enabled or ignoring_media or current_media_ignored() then return end
 
     local raw_title = get_property('media-title') or get_property('filename') or 'Unknown'
     local title = shared.current_tmdb_title or tagged_title() or shared.current_clean_title or raw_title
@@ -236,7 +246,7 @@ local function cancel_presence_refresh()
 end
 
 local function schedule_presence_refresh(force)
-    if ignoring_media then return end
+    if ignoring_media or current_media_ignored() then return end
     presence_refresh_force=presence_refresh_force or force==true
     if presence_refresh_timer then return end
     presence_refresh_timer=mp.add_timeout(PRESENCE_REFRESH_DELAY,function()
@@ -261,13 +271,19 @@ local function on_pause(_, paused)
     schedule_presence_refresh(true)
 end
 
+mp.register_event('start-file', function()
+    -- Hold all publishes until file-loaded has classified the new media.
+    ignoring_media = true
+    cancel_presence_refresh()
+    reset_presence_state()
+    stop_reconnect_watchdog()
+end)
+
 mp.register_event('file-loaded', function()
     cancel_presence_refresh()
     reset_presence_state()
 
-    local path = get_property('path')
-    ignoring_media = get_property_bool('demuxer-via-network') == true
-        or (is_ignored_path and is_ignored_path(path)) == true
+    ignoring_media = current_media_ignored()
     if ignoring_media then
         tmdb_abort_inflight_requests()
         shared.tmdb_lookup_generation = shared.tmdb_lookup_generation + 1
@@ -402,7 +418,7 @@ if shared.enabled then
     mp.add_timeout(1.5, function()
         if not shared.enabled then return end
         load_poster_cache()
-        if ignoring_media then return end
+        if ignoring_media or current_media_ignored() then return end
         -- file-loaded may already have connected and published the current
         -- activity. Do not reset its signature and send the same payload a
         -- second time when the delayed startup task runs.
