@@ -19,7 +19,7 @@ local ok, err = xpcall(function()
         string.format('expected ffi.os=%s, got %s', expected_os, ffi.os))
 
     local ipc_factory = assert(loadfile(root .. '/modules/ipc.lua'))()
-    local ipc = assert(ipc_factory({
+    local modules = {
         config = {CLIENT_ID = 'native-ipc-test', PID = 123},
         helpers = {
             byte = string.byte,
@@ -34,11 +34,14 @@ local ok, err = xpcall(function()
             parse_json = utils.parse_json,
             sub = string.sub,
         },
-    }, {}))
+    }
+    for _, name in ipairs({'ipc_transport_unix','ipc_transport_windows','ipc_transport'}) do
+        modules[name] = assert(loadfile(root .. '/modules/' .. name .. '.lua'))()(modules)
+    end
+    local ipc = assert(ipc_factory(modules, {}))
 
     local expect_unix = expected_os ~= 'Windows'
     assert(ipc.RPC.unix == expect_unix, 'selected the wrong IPC transport')
-    assert(ipc.RPC:handshake(), 'Discord IPC handshake failed')
 
     ipc.RPC.on_response = function(response, pending)
         if not pending or pending.command ~= 'SET_ACTIVITY'
@@ -50,8 +53,11 @@ local ok, err = xpcall(function()
         mp.commandv('quit', 0)
     end
 
-    local sent = ipc.RPC:set_activity({details = 'Native IPC test'})
-    assert(sent, 'activity frame could not be sent')
+    ipc.RPC.on_ready = function()
+        local sent = ipc.RPC:set_activity({details = 'Native IPC test'})
+        if not sent then fail('activity frame could not be sent') end
+    end
+    ipc.RPC:handshake()
     mp.add_timeout(8, function()
         fail('timed out waiting for the activity acknowledgement')
     end)
