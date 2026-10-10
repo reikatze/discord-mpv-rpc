@@ -79,8 +79,12 @@ local function create(api, options)
         local available = api.available(self.socket)
         if available == nil then return nil end
         if available == 0 then return '' end
-        local data = api.read(self.socket, math.min(4096, available))
+        local data, err = api.read(self.socket, math.min(4096, available))
+        if err == 'again' then return '' end
         return data and #data > 0 and data or nil
+    end
+    function transport:send_some(data, offset)
+        return api.write(self.socket, data, offset, math.min(65536, #data - offset))
     end
     function transport:send_raw(data)
         if not self.socket then return false end
@@ -125,42 +129,117 @@ local function native()
     typedef void* LPVOID;
     typedef const void* LPCVOID;
     typedef DWORD* LPDWORD;
+    typedef struct {
+        uintptr_t Internal; uintptr_t InternalHigh;
+        DWORD Offset; DWORD OffsetHigh; HANDLE hEvent;
+    } discord_rpc_overlapped;
     HANDLE CreateFileW(LPCWSTR, DWORD, DWORD, void*, DWORD, DWORD, HANDLE);
     BOOL WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, void*);
     BOOL ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, void*);
     BOOL CloseHandle(HANDLE);
     BOOL PeekNamedPipe(HANDLE, LPVOID, DWORD, LPDWORD, LPDWORD, LPDWORD);
+    HANDLE CreateEventW(void*, BOOL, BOOL, LPCWSTR);
+    DWORD WaitForSingleObject(HANDLE, DWORD);
+    DWORD GetLastError(void);
+    BOOL GetOverlappedResult(HANDLE, void*, LPDWORD, BOOL);
+    BOOL CancelIoEx(HANDLE, void*);
     ]]
     local C = ffi.C
     local INVALID = ffi.cast('HANDLE', -1)
-    local byte_pointer = ffi.typeof('const uint8_t*')
     local count_buffer = ffi.new('DWORD[1]')
+    local states, retired = {}, {}
+    local function reap()
+        for i = #retired, 1, -1 do
+            local op = retired[i]
+            if C.WaitForSingleObject(op.overlap[0].hEvent, 0) == 0 then
+                C.CloseHandle(op.overlap[0].hEvent)
+                table.remove(retired, i)
+            end
+        end
+    end
+    local function operation(count)
+        local event = C.CreateEventW(nil, 1, 0, nil)
+        if event == nil then return nil end
+        local op = {
+            overlap = ffi.new('discord_rpc_overlapped[1]'),
+            buffer = ffi.new('char[?]', count),
+        }
+        op.overlap[0].hEvent = event
+        return op
+    end
+    local function finish(handle, state, key)
+        local op = state[key]
+        if C.GetOverlappedResult(handle, op.overlap, count_buffer, 0) == 0 then
+            if C.GetLastError() == 996 then return nil, 'again' end
+            C.CloseHandle(op.overlap[0].hEvent)
+            state[key] = nil
+            return nil, 'failed'
+        end
+        local count = tonumber(count_buffer[0])
+        local value = key == 'read' and ffi.string(op.buffer, count) or count
+        C.CloseHandle(op.overlap[0].hEvent)
+        state[key] = nil
+        return value
+    end
     local api = {}
     function api.open(_, units)
+        reap()
         local wide = ffi.new('wchar_t[?]', #units)
         for i = 1, #units do wide[i - 1] = units[i] end
         local handle = C.CreateFileW(wide,
-            bit.bor(0x80000000, 0x40000000), 0, nil, 3, 0, nil)
-        return handle ~= INVALID and handle or nil
+            bit.bor(0x80000000, 0x40000000), 0, nil, 3, 0x40000000, nil)
+        if handle == INVALID then return nil end
+        states[tostring(handle)] = {}
+        return handle
     end
     function api.available(handle)
-        if C.PeekNamedPipe(handle, nil, 0, nil, count_buffer, nil) == 0 then
-            return nil
-        end
+        reap()
+        local state = states[tostring(handle)]
+        if state and state.read then return 4096 end
+        if C.PeekNamedPipe(handle, nil, 0, nil, count_buffer, nil) == 0 then return nil end
         return tonumber(count_buffer[0])
     end
     function api.write(handle, data, offset, count)
-        if C.WriteFile(handle, ffi.cast(byte_pointer, data) + offset,
-            count, count_buffer, nil) == 0 then return nil end
-        return tonumber(count_buffer[0])
+        reap()
+        local state = states[tostring(handle)]
+        if state.write then return finish(handle, state, 'write') end
+        local op = operation(count)
+        if not op then return nil, 'failed' end
+        ffi.copy(op.buffer, data:sub(offset + 1, offset + count), count)
+        state.write = op
+        if C.WriteFile(handle, op.buffer, count, count_buffer, op.overlap) == 0
+            and C.GetLastError() ~= 997 then
+            C.CloseHandle(op.overlap[0].hEvent);state.write = nil
+            return nil, 'failed'
+        end
+        return finish(handle, state, 'write')
     end
     function api.read(handle, count)
-        local buffer = ffi.new('char[?]', count)
-        if C.ReadFile(handle, buffer, count, count_buffer, nil) == 0
-            or count_buffer[0] == 0 then return nil end
-        return ffi.string(buffer, count_buffer[0])
+        local state = states[tostring(handle)]
+        if state.read then return finish(handle, state, 'read') end
+        local op = operation(count)
+        if not op then return nil, 'failed' end
+        state.read = op
+        if C.ReadFile(handle, op.buffer, count, count_buffer, op.overlap) == 0
+            and C.GetLastError() ~= 997 then
+            C.CloseHandle(op.overlap[0].hEvent);state.read = nil
+            return nil, 'failed'
+        end
+        return finish(handle, state, 'read')
     end
-    function api.close(handle) C.CloseHandle(handle) end
+    function api.close(handle)
+        local key = tostring(handle)
+        local state = states[key] or {}
+        for _, op in pairs(state) do
+            C.CancelIoEx(handle, op.overlap)
+            -- Cancellation is asynchronous. Keep both the buffer and OVERLAPPED
+            -- alive until the completion event is signalled, even after close.
+            retired[#retired + 1] = op
+        end
+        C.CloseHandle(handle)
+        states[key] = nil
+        reap()
+    end
     return create(api)
 end
 

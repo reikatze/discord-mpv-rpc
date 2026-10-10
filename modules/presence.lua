@@ -23,7 +23,7 @@ local log_warn = modules.helpers.log_warn
 local time = modules.helpers.time
 local truncate_utf8 = modules.helpers.truncate_utf8
 local RPC = modules.ipc.RPC
-local rpc_backoff_active = modules.ipc.rpc_backoff_active
+local rpc_retry_delay = modules.ipc.rpc_retry_delay or function() return 1 end
 local clear_title_state = modules.metadata.clear_title_state
 local lookup_poster = modules.metadata.lookup_poster
 local tmdb_abort_inflight_requests = modules.tmdb_requests.tmdb_abort_inflight_requests
@@ -71,29 +71,27 @@ local function stop_reconnect_watchdog()
 end
 
 local function start_reconnect_watchdog()
-    if reconnect_timer or not shared.enabled or ignoring_media
+    if reconnect_timer or RPC.socket or not shared.enabled or ignoring_media
         or current_media_ignored() then return end
 
-    reconnect_timer = mp.add_periodic_timer(1, function()
-        if not shared.enabled then
-            stop_reconnect_watchdog()
-            return
-        end
-        if RPC.socket then
-            stop_reconnect_watchdog()
-            return
-        end
-        if rpc_backoff_active() then return end
-
+    reconnect_timer = mp.add_timeout(math.max(0.01, rpc_retry_delay()), function()
+        reconnect_timer = nil
+        if not shared.enabled or ignoring_media or current_media_ignored() then return end
         if RPC:handshake() then
-            stop_reconnect_watchdog()
-            -- Re-publish the current state after Discord comes back.
             shared.tick(true)
+        elseif not RPC.socket then
+            start_reconnect_watchdog()
         end
+        -- A connected socket may still be awaiting READY. Its handshake
+        -- deadline and on_disconnect callback own retries in that state.
     end)
 end
 
 RPC.on_disconnect = start_reconnect_watchdog
+RPC.on_ready = function()
+    stop_reconnect_watchdog()
+    if shared.enabled then shared.tick(true) end
+end
 
 local function playback_state_label(idle, paused, buffering)
     if idle then return 'Idle' end
@@ -272,6 +270,7 @@ local function on_pause(_, paused)
 end
 
 mp.register_event('start-file', function()
+    shared.media_loading = true
     -- Hold all publishes until file-loaded has classified the new media.
     ignoring_media = true
     cancel_presence_refresh()
@@ -280,6 +279,7 @@ mp.register_event('start-file', function()
 end)
 
 mp.register_event('file-loaded', function()
+    shared.media_loading = false
     cancel_presence_refresh()
     reset_presence_state()
 
@@ -294,10 +294,11 @@ mp.register_event('file-loaded', function()
     end
 
     lookup_poster()
-    shared.tick(true)
+    shared.tick(false)
 end)
 
 mp.register_event('end-file', function()
+    shared.media_loading = false
     local ignored_media = ignoring_media
     ignoring_media = false
     cancel_presence_refresh()
@@ -396,12 +397,15 @@ mp.add_key_binding(KEY_TOGGLE, 'discord-mpv-rpc-toggle', function()
     shared.enabled = not shared.enabled
     if shared.enabled then
         reset_presence_state()
-        shared.tick(true)
+        if not ignoring_media and not current_media_ignored() then lookup_poster() end
+        shared.tick(false)
         if not ignoring_media and not RPC.socket then
             start_reconnect_watchdog()
         end
         mp.osd_message('Discord RPC: on')
     else
+        shared.tmdb_lookup_generation = shared.tmdb_lookup_generation + 1
+        tmdb_abort_inflight_requests()
         cancel_presence_refresh()
         stop_rejection_retry()
         stop_reconnect_watchdog()
