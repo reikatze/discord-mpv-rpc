@@ -62,6 +62,9 @@ local config_factory = assert(loadfile(root .. '/modules/config.lua'))()
 local default_config = config_factory({}, {})
 equal(default_config.CACHE_PATH, nil, 'default script-directory cache path')
 equal(expand_path_calls, 0, 'default cache path needs no expansion')
+equal(default_config.is_ignored_path('/media/ordinary.mkv'), false,
+    'empty exclusion list ignores no media')
+equal(expand_path_calls, 0, 'empty exclusion list skips path expansion')
 configured_cache_path = '~~/custom-cache.json'
 local custom_config = config_factory({}, {})
 equal(custom_config.CACHE_PATH, '/expanded/~~/custom-cache.json',
@@ -1114,4 +1117,5 @@ for _,path in ipairs({
     passed = passed + 1
 end
 
+passed = passed + assert(loadfile(tests_dir .. '/optimizations.lua'))()(root)
 io.write(string.format('ok - %d assertions\n', passed))
