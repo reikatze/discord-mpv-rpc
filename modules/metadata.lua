@@ -8,10 +8,18 @@ local clean_filename = modules.filename.clean_filename
 local directory_context = modules.filename.directory_context
 local format = modules.helpers.format
 local get_property = modules.helpers.get_property
+local get_property_bool = modules.helpers.get_property_bool or mp.get_property_bool
 local log_verbose = modules.helpers.log_verbose
 local run_async = modules.http.run_async
 local tmdb_lookup = modules.tmdb.tmdb_lookup
 local tmdb_abort_inflight_requests = modules.tmdb_requests.tmdb_abort_inflight_requests
+
+local function eligible()
+    local path = get_property('path')
+    return shared.enabled == true and not shared.media_loading and path ~= nil
+        and get_property_bool('demuxer-via-network') ~= true
+        and not (is_ignored_path and is_ignored_path(path))
+end
 
 local function clear_title_state()
     shared.current_poster = nil
@@ -39,15 +47,16 @@ local function lookup_poster()
     -- Invalidate and abort older TMDb work immediately. mpv's asynchronous
     -- subprocess command supports aborting curl, so stale files no longer
     -- keep an unnecessary network request alive in the background.
-    tmdb_abort_inflight_requests()
     shared.tmdb_lookup_generation = shared.tmdb_lookup_generation + 1
+    tmdb_abort_inflight_requests()
     local gen = shared.tmdb_lookup_generation
 
     clear_title_state()
 
+    if not eligible() then return end
+
     local path = get_property('path')
     if not path then return end
-    if is_ignored_path and is_ignored_path(path) then return end
 
     local title, year, is_tv, season, ep = clean_filename(path)
     local directory_title = nil
@@ -73,7 +82,7 @@ local function lookup_poster()
         local hit = tmdb_lookup(
             title, year, is_tv, season, ep, directory_title, gen
         )
-        if gen ~= shared.tmdb_lookup_generation then return end
+        if gen ~= shared.tmdb_lookup_generation or not eligible() then return end
         apply_tmdb_hit(hit)
         shared.tick(false)
         if hit and hit.poster then
@@ -83,6 +92,7 @@ local function lookup_poster()
 end
 
 return {
+    eligible = eligible,
     clear_title_state = clear_title_state,
     lookup_poster = lookup_poster,
 }

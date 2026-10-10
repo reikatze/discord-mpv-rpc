@@ -214,7 +214,11 @@ By default, metadata is cached in `discord-mpv-rpc-posters.json` beside `main.lu
 
 Successful TMDb results are refreshed according to `tmdb_positive_cache_days`. Missing results use shorter retry periods. If you deliberately want to test matching from scratch, close mpv and delete the cache file first.
 
-TMDb requests are paced, combined when possible, cached, and cancelled when they belong to a file that is no longer active. The script also backs off automatically after an HTTP 429 response. Local-index lookups read small, bounded sections from disk instead of loading the whole database into memory.
+TMDb requests are paced, combined when possible, cached, and cancelled when they belong to a file that is no longer active or presence is turned off. Enabling presence resolves the current file again. The script also backs off automatically after an HTTP 429 response. Local-index lookups read small, bounded sections from disk and reuse up to 256 title lookups per index generation instead of loading the whole database into memory.
+
+Season responses supply episode titles and artwork for subsequent episodes when available. These records expire within one day; missing or incomplete records fall back to the exact episode endpoint.
+
+Discord handshakes, reads, and writes run without waiting for a reply on mpv's script thread. Handshakes and queued writes time out after three seconds, and reconnect attempts follow the backoff deadline. Windows requires LuaJIT for this nonblocking IPC transport; Unix can use LuaJIT or LuaSocket.
 
 With `poster_fit=contain`, the TMDb image URL is sent to [wsrv.nl](https://wsrv.nl/) so portrait artwork fits Discord's square image area. Set `poster_fit=raw` if you do not want to use that third-party image service; Discord may crop the original image.
 
@@ -230,7 +234,7 @@ With `poster_fit=contain`, the TMDb image URL is sent to [wsrv.nl](https://wsrv.
 | No `of <total>` text | The season total is unavailable or smaller than the current episode number |
 | A poster is cropped | Set `poster_fit=contain` |
 | You do not want to use wsrv.nl | Set `poster_fit=raw` |
-| Discord was restarted after mpv | Reconnection is automatic; background detection on Windows requires LuaJIT |
+| Discord was restarted after mpv | Reconnection is automatic; Discord IPC on Windows requires LuaJIT |
 | The local index does not build | Use a LuaJIT-enabled mpv, verify `curl`, and make sure the script directory is writable |
 
 Running mpv from a terminal—or turning on verbose logging—usually provides the most useful details.

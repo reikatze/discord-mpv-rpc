@@ -16,7 +16,7 @@ end
 local function install(target)
     target.unix = transport.unix
     for _, name in ipairs({
-        'connect', 'read_available', 'send_raw', 'recv_raw', 'close',
+        'connect', 'read_available', 'send_some', 'recv_raw', 'close',
     }) do
         target[name] = transport[name]
     end

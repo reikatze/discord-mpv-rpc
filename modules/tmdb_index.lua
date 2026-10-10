@@ -13,6 +13,19 @@ return function(modules, shared)
     local has_api_key = modules.config.TMDB_KEY ~= nil
         and modules.config.TMDB_KEY ~= ''
     local manifest, bad_generation, observed_generation
+    local candidate_cache, candidate_slots, candidate_slot = {}, {}, 1
+    local candidate_generation
+    local function reset_candidate_cache()
+        candidate_cache, candidate_slots, candidate_slot = {}, {}, 1
+        candidate_generation = nil
+    end
+    local function remember_candidates(key, ids)
+        local evicted = candidate_slots[candidate_slot]
+        if evicted then candidate_cache[evicted] = nil end
+        candidate_slots[candidate_slot] = key
+        candidate_cache[key] = ids
+        candidate_slot = candidate_slot % 256 + 1
+    end
     local next_launch, next_read = 0, 0
     local FULL_CHECK_INTERVAL = 24*60*60
     local function maintenance_due()
@@ -101,6 +114,7 @@ return function(modules, shared)
         return manifest
     end
     local function corrupt()
+        reset_candidate_cache()
         if manifest and bad_generation~=manifest.generation then
             bad_generation=manifest.generation;next_launch=0
         end
@@ -112,12 +126,32 @@ return function(modules, shared)
     end
     local function candidates_many(titles, is_tv)
         local loaded, meta = pcall(load_manifest)
-        if not loaded or not meta then return {} end
+        if not loaded or not meta then reset_candidate_cache();return {} end
+        if candidate_generation ~= meta.generation then
+            reset_candidate_cache()
+            candidate_generation = meta.generation
+        end
         local media = is_tv and 'tv' or 'movie'
         local count = meta.counts[media]
         if type(count) ~= 'number' or count < 1 or count % 1 ~= 0 or count > 10000000 then return {} end
         if meta.layout ~= nil and meta.layout ~= 'flat' then return {} end
         local base = root .. meta.generation .. (meta.layout == 'flat' and '-' or '/') .. media
+        local ids,seen,keys,missing={},{},{},{}
+        local function add(values)
+            for _,id in ipairs(values) do
+                if not seen[id] then seen[id]=true;ids[#ids+1]=id end
+            end
+        end
+        for i=1,#titles do
+            local key=normalize(titles[i])
+            if key~='' and not keys[key] then
+                keys[key]=true
+                local cache_key=media..':'..key
+                if candidate_cache[cache_key] then add(candidate_cache[cache_key])
+                else missing[#missing+1]={key=key,cache_key=cache_key} end
+            end
+        end
+        if #missing==0 then table.sort(ids);return ids end
         local offsets = io.open(base .. '.offsets', 'rb')
         local data = io.open(base .. '.jsonl', 'rb')
         if not offsets or not data then
@@ -127,35 +161,34 @@ return function(modules, shared)
         end
         local ok, result = pcall(function()
             assert(offsets:seek('end') == count * 17)
-            local ids,seen,keys={},{},{}
-            for i=1,#titles do
-                local key=normalize(titles[i])
-                if key~='' and not keys[key] then
-                    keys[key]=true
-                    local low, high = 0, count - 1
-                    while low <= high do
-                        local mid = math.floor((low + high) / 2)
-                        assert(offsets:seek('set', mid * 17))
-                        local entry = offsets:read(17)
-                        assert(entry and entry:match('^%d+\n$'))
-                        assert(data:seek('set', assert(tonumber(entry))))
-                        local block = data:read(4096)
-                        local line = block and block:match('^([^\n]*)\n')
-                        local row = line and parse_json(line)
-                        assert(type(row) == 'table' and type(row[1]) == 'string'
-                            and type(row[2]) == 'table')
-                        if row[1] == key then
-                            if #row[2] <= 4 then
-                                for _,id in ipairs(row[2]) do
-                                    assert(type(id)=='number' and id>0 and id%1==0)
-                                    if not seen[id] then seen[id]=true;ids[#ids+1]=id end
-                                end
+            for i=1,#missing do
+                local key=missing[i].key
+                local matched={}
+                local low, high = 0, count - 1
+                while low <= high do
+                    local mid = math.floor((low + high) / 2)
+                    assert(offsets:seek('set', mid * 17))
+                    local entry = offsets:read(17)
+                    assert(entry and entry:match('^%d+\n$'))
+                    assert(data:seek('set', assert(tonumber(entry))))
+                    local block = data:read(4096)
+                    local line = block and block:match('^([^\n]*)\n')
+                    local row = line and parse_json(line)
+                    assert(type(row) == 'table' and type(row[1]) == 'string'
+                        and type(row[2]) == 'table')
+                    if row[1] == key then
+                        if #row[2] <= 4 then
+                            for _,id in ipairs(row[2]) do
+                                assert(type(id)=='number' and id>0 and id%1==0)
+                                matched[#matched+1]=id
                             end
-                            break
-                        elseif less(row[1], key) then low = mid + 1
-                        else high = mid - 1 end
-                    end
+                        end
+                        break
+                    elseif less(row[1], key) then low = mid + 1
+                    else high = mid - 1 end
                 end
+                add(matched)
+                remember_candidates(missing[i].cache_key,matched)
             end
             table.sort(ids)
             return ids
@@ -186,6 +219,7 @@ return function(modules, shared)
     end
     local function toggle()
         enabled=not enabled
+        reset_candidate_cache()
         manifest=nil;next_read=0
         if enabled then next_launch=0;launch() end
         mp.add_timeout(0,function()

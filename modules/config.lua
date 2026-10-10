@@ -172,6 +172,7 @@ else
 end
 
 local function is_ignored_path(path)
+    if #ignored_paths == 0 then return false end
     local normalized = normalize_local_path(path)
     if not normalized then return false end
     for _, ignored in ipairs(ignored_paths) do

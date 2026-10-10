@@ -65,6 +65,10 @@ local rpc_backoff_until = 0
 local rpc_backoff_sec = 1
 local RPC_BACKOFF_MAX = 30
 
+local function rpc_retry_delay()
+    return math.max(0, rpc_backoff_until - mp.get_time())
+end
+
 local function rpc_backoff_active()
     return mp.get_time() < rpc_backoff_until
 end
@@ -87,6 +91,10 @@ do
         self.rx_buffer = ''
         self.rx_started_at = nil
         self.pending = {}
+        self.handshaking = false
+        self.handshake_deadline = nil
+        self.tx_queue = {}
+        self.tx_bytes = 0
         transport_close(self)
     end
 end
@@ -129,6 +137,14 @@ function RPC:drain_frames()
         elseif op == 1 then
             local response = parse_json(payload)
             if type(response) ~= 'table' then return false end
+            if self.handshaking then
+                if response.evt ~= 'READY' then return false end
+                self.handshaking = false
+                self.handshake_deadline = nil
+                rpc_note_success()
+                log_info('connected to Discord')
+                if self.on_ready then self.on_ready() end
+            end
             local nonce=response.nonce and tostring(response.nonce) or nil
             local pending=nonce and self.pending[nonce] or nil
             if nonce then self.pending[nonce]=nil end
@@ -150,15 +166,48 @@ function RPC:drain_frames()
     return true
 end
 
+-- The transport performs one nonblocking operation at a time. Queue limits
+-- bound memory; every frame has a deadline, including the handshake.
+function RPC:flush_writes()
+    self.tx_queue = self.tx_queue or {}
+    for _ = 1, 16 do
+        local item = self.tx_queue[1]
+        if not item then return true end
+        if mp.get_time() >= item.deadline then return false end
+        local count, err = self:send_some(item.data, item.offset)
+        if count and count > 0 then
+            item.offset = item.offset + count
+            if item.offset == #item.data then
+                self.tx_bytes = self.tx_bytes - #item.data
+                table.remove(self.tx_queue, 1)
+            elseif item.offset > #item.data then return false end
+        elseif err == 'again' or err == 'interrupted' then return true
+        else return false end
+    end
+    return true
+end
+
+function RPC:send_raw(data)
+    if not self.socket or not self.send_some then return false end
+    self.tx_queue = self.tx_queue or {}
+    self.tx_bytes = self.tx_bytes or 0
+    if self.tx_bytes + #data > MAX_RPC_FRAME or #self.tx_queue >= 64 then return false end
+    self.tx_queue[#self.tx_queue + 1] = {
+        data = data, offset = 0, deadline = mp.get_time() + 3,
+    }
+    self.tx_bytes = self.tx_bytes + #data
+    return self:flush_writes()
+end
+
 function RPC:start_reader()
     if self.reader_timer then return end
-    if not self.read_available then
-        log_warn('LuaJIT is required on Windows for background IPC disconnect detection')
-        return
-    end
     self.rx_buffer = ''
     self.reader_timer = mp.add_periodic_timer(0.25, function()
         if not self.socket then return end
+        if not self:flush_writes() then
+            self:connection_failed('Discord IPC write timed out or failed')
+            return
+        end
         for _ = 1, 32 do
             local chunk = self:read_available()
             if chunk == nil then
@@ -173,17 +222,23 @@ function RPC:start_reader()
                 self:connection_failed('Discord IPC received an invalid frame')
                 return
             end
+            if not self.socket then return end
             if chunk == '' then break end
         end
-        if self.rx_started_at and mp.get_time() - self.rx_started_at > 5 then
+        if self.handshaking and mp.get_time() >= self.handshake_deadline then
+            self:connection_failed('Discord IPC handshake timed out')
+        elseif self.rx_started_at and mp.get_time() - self.rx_started_at > 5 then
             self:connection_failed('Discord IPC partial frame timed out')
         end
     end)
 end
 
 function RPC:handshake()
-    if self.socket then return true end
-    if rpc_backoff_active() then
+    if self.socket then return not self.handshaking end
+    if rpc_backoff_active() then return false end
+    if not self.read_available or not self.send_some then
+        log_warn('nonblocking Discord IPC requires LuaJIT on Windows')
+        rpc_note_failure()
         return false
     end
     if not self:connect() then
@@ -191,60 +246,19 @@ function RPC:handshake()
         log_verbose('no Discord IPC pipe (is Discord running?)')
         return false
     end
-
-    local body = format_json{ v = 1, client_id = CLIENT_ID }
-    if not self:send_raw(pack(0, body)) then
-        log_error('handshake send failed')
-        self:close()
-        rpc_note_failure()
-        return false
-    end
-
-    local hdr = self:recv_raw(8)
-    if not hdr or #hdr < 8 then
-        log_error('handshake recv failed')
-        self:close()
-        rpc_note_failure()
-        return false
-    end
-
-    local valid, op, len = valid_rpc_header(hdr)
-    if not valid then
-        log_error('handshake received invalid IPC frame')
-        self:close()
-        rpc_note_failure()
-        return false
-    end
-    if op ~= 1 then
-        log_error('handshake received unexpected IPC opcode ' .. tostring(op))
-        self:close()
-        rpc_note_failure()
-        return false
-    end
-
-    local payload = self:recv_raw(len)
-    if not payload then
-        log_error('handshake payload recv failed')
-        self:close()
-        rpc_note_failure()
-        return false
-    end
-    local res = parse_json(payload)
-    if not res or res.evt ~= 'READY' then
-        log_error('handshake not READY (check client_id)')
-        self:close()
-        rpc_note_failure()
-        return false
-    end
-
-    rpc_note_success()
+    self.handshaking = true
+    self.handshake_deadline = mp.get_time() + 3
     self:start_reader()
-    log_info('connected to Discord')
-    return true
+    local body = format_json{ v = 1, client_id = CLIENT_ID }
+    if not body or not self:send_raw(pack(0, body)) then
+        self:connection_failed('Discord IPC handshake send failed')
+    end
+    -- READY arrives through the reader. Callers retry publishing via on_ready.
+    return false
 end
 
 function RPC:set_activity(activity, context)
-    if not self.socket and not self:handshake() then
+    if (not self.socket or self.handshaking) and not self:handshake() then
         return false
     end
 
@@ -276,5 +290,6 @@ end
 return {
     RPC = RPC,
     rpc_backoff_active = rpc_backoff_active,
+    rpc_retry_delay = rpc_retry_delay,
 }
 end

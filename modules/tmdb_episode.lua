@@ -58,7 +58,7 @@ local function persistent_key(show_id, season, episode)
         tostring(show_id), season, episode, TMDB_LANG)
 end
 
-local function season_episode_count(show_id, season, lookup_token)
+local function season_episode_count(show_id, season, lookup_token, show_hit)
     local key = format('season-count:%s:S%02d', tostring(show_id), season)
     local cached = shared.poster_cache[key]
     if type(cached) == 'table' and not persistent_entry_expired(cached) then
@@ -73,6 +73,27 @@ local function season_episode_count(show_id, season, lookup_token)
     if data and tonumber(data.season_number) == tonumber(season)
         and type(data.episodes) == 'table' and #data.episodes > 0 then
         count = #data.episodes
+        -- Cache the transformed records, not the full season response. Ongoing
+        -- seasons may change, so records learned here live at most one day.
+        if show_hit then
+            local expires = time() + math.min(TMDB_POSITIVE_CACHE_TTL, 86400)
+            for _, item in ipairs(data.episodes) do
+                local number = type(item) == 'table' and tonumber(item.episode_number)
+                if number and number >= 0 and number % 1 == 0
+                    and tonumber(item.season_number) == tonumber(season)
+                    and type(item.name) == 'string' and item.name ~= '' then
+                    local poster = show_hit.poster
+                    if type(item.still_path) == 'string' and item.still_path ~= '' then
+                        poster = 'https://image.tmdb.org/t/p/w500' .. item.still_path
+                    end
+                    remember_poster(persistent_key(show_id, season, number), {
+                        poster = poster, title = show_hit.title, type = 'tv',
+                        id = show_id, episode = item.name, expires_at = expires,
+                        url = show_hit.url .. '/season/' .. season .. '/episode/' .. number,
+                    })
+                end
+            end
+        end
     end
     remember_poster(key, {
         count = count,
@@ -113,6 +134,12 @@ local function apply_episode(hit, season, episode, lookup_token)
     end
 
     local episode_hit = unpack_cache_entry(cached)
+    if not episode_hit then
+        season_episode_count(hit.id, season, lookup_token, hit)
+        if tmdb_lookup_cancelled(lookup_token) then return nil end
+        cached = shared.poster_cache[key]
+        episode_hit = unpack_cache_entry(cached)
+    end
     if episode_hit then
         if type(cached) == 'table' and not cached.expires_at then
             cached.expires_at = time() + TMDB_POSITIVE_CACHE_TTL

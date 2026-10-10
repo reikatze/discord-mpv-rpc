@@ -58,6 +58,10 @@ local function create(api, options)
         return nil
     end
 
+    function transport:send_some(data, offset)
+        return api.send(self.socket, data, offset, math.min(65536, #data - offset))
+    end
+
     function transport:send_raw(data)
         if not self.socket then return false end
         local sent, deadline = 0, now() + 1.5
@@ -153,12 +157,15 @@ local function native()
             address.sun_len = settings.address_length
             address_length = settings.address_length
         end
+        local flags = C.fcntl(fd, 3, 0)
+        if flags < 0 or C.fcntl(fd, 4, bit.bor(flags, settings.nonblocking_flag)) < 0 then
+            C.close(fd)
+            return nil
+        end
         if C.connect(fd, address, address_length) ~= 0 then
             C.close(fd)
             return nil
         end
-        local flags = C.fcntl(fd, 3, 0)
-        if flags >= 0 then C.fcntl(fd, 4, bit.bor(flags, settings.nonblocking_flag)) end
         return fd
     end
 
@@ -209,7 +216,7 @@ local function luasocket()
     function transport:connect()
         for _, path in ipairs(ipc_paths(os.getenv)) do
             local socket = socket_factory()
-            socket:settimeout(1.5)
+            socket:settimeout(0)
             if socket:connect(path) then
                 self.socket = socket
                 log_verbose('connected ' .. path)
@@ -226,6 +233,12 @@ local function luasocket()
         local chunk = data or partial
         if chunk and #chunk > 0 then return chunk end
         return err == 'timeout' and '' or nil
+    end
+    function transport:send_some(data, offset)
+        self.socket:settimeout(0)
+        local count, err, partial = self.socket:send(data:sub(offset + 1))
+        if count or (partial and partial > 0) then return count or partial end
+        return nil, err == 'timeout' and 'again' or 'failed'
     end
     function transport:send_raw(data)
         if not self.socket then return false end
