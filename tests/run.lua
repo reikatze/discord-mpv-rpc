@@ -1119,4 +1119,6 @@ for _,path in ipairs({
 end
 
 passed = passed + assert(loadfile(tests_dir .. '/optimizations.lua'))()(root)
+local has_codec, codec = pcall(require, 'mp.utils')
+passed = passed + assert(loadfile(tests_dir .. '/presence_payload.lua'))()(root, has_codec and codec or nil)
 io.write(string.format('ok - %d assertions\n', passed))
