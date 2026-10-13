@@ -128,9 +128,11 @@ jobs:
           git -C "$runtime_source" fetch --depth=1 origin "$MPV_TEST_COMMIT"
           git -C "$runtime_source" checkout --detach FETCH_HEAD
           test "$(git -C "$runtime_source" rev-parse HEAD)" = "$MPV_TEST_COMMIT"
+          # Keep native Windows threading enabled when disabling optional features.
           meson setup "$runtime_source/build" "$runtime_source" \
             --buildtype=release --wrap-mode=nofallback \
-            -Dauto_features=disabled -Dgl=disabled -Dlua=luajit -Dlibmpv=false -Dtests=false
+            -Dauto_features=disabled -Dwin32-threads=enabled -Dgl=disabled \
+            -Dlua=luajit -Dlibmpv=false -Dtests=false
           meson compile -C "$runtime_source/build" -j 2
           printf 'MPV_BIN=%s\n' "$(cygpath -m "$runtime_source/build/mpv.exe")" >> "$GITHUB_ENV"
           printf 'FFMPEG_BIN=%s\n' "$(cygpath -m /ucrt64/bin/ffmpeg.exe)" >> "$GITHUB_ENV"
