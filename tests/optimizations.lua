@@ -233,7 +233,7 @@ local main_chunk=assert(loadfile(root..'/main.lua'))
 local captured_state, presence_loaded
 mp.get_script_directory=function() return root end
 loadfile=function(path)
-    local name=assert(path:match('/modules/(.+)%.lua$'))
+    local name=assert(path:match('[/\\]modules[/\\](.+)%.lua$'))
     return function()
         return function(_,state)
             captured_state=state

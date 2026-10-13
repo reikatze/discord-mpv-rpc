@@ -1,0 +1,179 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.runtime }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: Lua 5.4
+            package: lua5.4
+            executable: lua5.4
+          - runtime: LuaJIT
+            package: luajit
+            executable: luajit
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Lua
+        env:
+          LUA_PACKAGE: ${{ matrix.package }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends "$LUA_PACKAGE"
+      - name: Run unit and regression tests
+        env:
+          LUA_EXECUTABLE: ${{ matrix.executable }}
+        run: '"$LUA_EXECUTABLE" tests/run.lua'
+
+  platforms:
+    name: Playback and native IPC (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x64
+            runner: ubuntu-24.04
+            native: Linux
+          - platform: Windows x64
+            runner: windows-2022
+            native: Windows
+          - platform: macOS ARM64
+            runner: macos-15
+            native: OSX
+          - platform: macOS Intel
+            runner: macos-15-intel
+            native: OSX
+    env:
+      MPV_RPC_TEST_PLATFORM: ${{ matrix.native }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential git meson ninja-build pkg-config ffmpeg \
+            libass-dev libavcodec-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libswresample-dev libswscale-dev \
+            libplacebo-dev libluajit-5.1-dev
+      - name: Build Linux LuaJIT test runtime
+        if: runner.os == 'Linux'
+        env:
+          MPV_TEST_COMMIT: a0fba7be57f3822d967b04f0f6b6d6341e7516e7 # v0.39.0
+        run: |
+          runtime_source="$RUNNER_TEMP/mpv-source"
+          git init "$runtime_source"
+          git -C "$runtime_source" remote add origin https://github.com/mpv-player/mpv.git
+          git -C "$runtime_source" fetch --depth=1 origin "$MPV_TEST_COMMIT"
+          git -C "$runtime_source" checkout --detach FETCH_HEAD
+          test "$(git -C "$runtime_source" rev-parse HEAD)" = "$MPV_TEST_COMMIT"
+          meson setup "$runtime_source/build" "$runtime_source" \
+            --buildtype=release --wrap-mode=nofallback \
+            -Dauto_features=disabled -Dlua=luajit -Dlibmpv=false -Dtests=false
+          meson compile -C "$runtime_source/build" -j 2
+          printf 'MPV_BIN=%s\n' "$runtime_source/build/mpv" >> "$GITHUB_ENV"
+          printf 'FFMPEG_BIN=%s\n' "$(command -v ffmpeg)" >> "$GITHUB_ENV"
+      - name: Install macOS LuaJIT test runtime
+        if: runner.os == 'macOS'
+        run: |
+          brew install mpv ffmpeg
+          printf 'MPV_BIN=%s\n' "$(command -v mpv)" >> "$GITHUB_ENV"
+          printf 'FFMPEG_BIN=%s\n' "$(command -v ffmpeg)" >> "$GITHUB_ENV"
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-libass
+            mingw-w64-ucrt-x86_64-libplacebo
+            mingw-w64-ucrt-x86_64-luajit
+      - name: Build Windows LuaJIT test runtime
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          MPV_TEST_COMMIT: 41f6a645068483470267271e1d09966ca3b9f413 # v0.41.0
+        run: |
+          runtime_source="$(cygpath -u "$RUNNER_TEMP")/mpv-source"
+          git init "$runtime_source"
+          git -C "$runtime_source" remote add origin https://github.com/mpv-player/mpv.git
+          git -C "$runtime_source" fetch --depth=1 origin "$MPV_TEST_COMMIT"
+          git -C "$runtime_source" checkout --detach FETCH_HEAD
+          test "$(git -C "$runtime_source" rev-parse HEAD)" = "$MPV_TEST_COMMIT"
+          meson setup "$runtime_source/build" "$runtime_source" \
+            --buildtype=release --wrap-mode=nofallback \
+            -Dauto_features=disabled -Dlua=luajit -Dlibmpv=false -Dtests=false
+          meson compile -C "$runtime_source/build" -j 2
+          printf 'MPV_BIN=%s\n' "$(cygpath -m "$runtime_source/build/mpv.exe")" >> "$GITHUB_ENV"
+          printf 'FFMPEG_BIN=%s\n' "$(cygpath -m /ucrt64/bin/ffmpeg.exe)" >> "$GITHUB_ENV"
+          cygpath -m /ucrt64/bin >> "$GITHUB_PATH"
+      - name: Prepare Unix test media and isolated IPC directory
+        if: runner.os != 'Windows'
+        run: |
+          test_work="$RUNNER_TEMP/tracker-tests"
+          # Keep AF_UNIX socket paths below macOS's 104-byte limit.
+          ipc_work="$(mktemp -d /tmp/mpv-ipc.XXXXXX)"
+          mkdir -p "$test_work/config/script-opts"
+          "$FFMPEG_BIN" -hide_banner -loglevel error -y \
+            -f lavfi -i 'testsrc2=size=320x180:rate=24' \
+            -t 6 -an -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            "$test_work/test-video.mp4"
+          printf 'MPV_TEST_WORK=%s\nMPV_TEST_MEDIA=%s\nXDG_RUNTIME_DIR=%s\n' \
+            "$test_work" "$test_work/test-video.mp4" "$ipc_work" >> "$GITHUB_ENV"
+      - name: Prepare Windows test media
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          test_work="$(cygpath -u "$RUNNER_TEMP")/tracker-tests"
+          mkdir -p "$test_work/config/script-opts"
+          /ucrt64/bin/ffmpeg.exe -hide_banner -loglevel error -y \
+            -f lavfi -i 'testsrc2=size=320x180:rate=24' \
+            -t 6 -an -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+            "$test_work/test-video.mp4"
+          printf 'MPV_TEST_WORK=%s\nMPV_TEST_MEDIA=%s\n' \
+            "$(cygpath -m "$test_work")" "$(cygpath -m "$test_work/test-video.mp4")" >> "$GITHUB_ENV"
+      - name: Run Unix playback and native IPC suites
+        if: runner.os != 'Windows'
+        run: |
+          "$MPV_BIN" --no-config --load-scripts=no --idle=yes --vo=null --ao=null \
+            --script=tests/mpv/portable_runner.lua
+          "$MPV_BIN" --no-config --load-scripts=no --idle=yes --vo=null --ao=null \
+            --script=tests/mpv/native_ipc_runner.lua
+      - name: Run Windows playback and native IPC suites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & $env:MPV_BIN --no-config --load-scripts=no --idle=yes --vo=null --ao=null --terminal=yes --script=tests/mpv/portable_runner.lua
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:MPV_BIN --no-config --load-scripts=no --idle=yes --vo=null --ao=null --terminal=yes --script=tests/mpv/native_ipc_runner.lua
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # All fixtures are local. No Discord login, TMDb key, database download,
+      # publishing, or repository-write permissions are needed.
