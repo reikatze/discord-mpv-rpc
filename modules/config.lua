@@ -167,22 +167,36 @@ if not valid_ignored_paths then
 else
     for _, entry in ipairs(parsed_ignored_paths) do
         local normalized = normalize_local_path(trim(entry))
-        if normalized then ignored_paths[#ignored_paths + 1] = normalized end
+        if normalized then
+            ignored_paths[#ignored_paths + 1] = {
+                path = normalized,
+                prefix = normalized:sub(-1) == '/' and normalized or normalized .. '/',
+            }
+        end
     end
 end
 
+local ignored_path_cache
 local function is_ignored_path(path)
     if #ignored_paths == 0 then return false end
+    local working_directory = mp.get_property('working-directory')
+    if ignored_path_cache and ignored_path_cache.path == path
+        and ignored_path_cache.working_directory == working_directory then
+        return ignored_path_cache.value
+    end
     local normalized = normalize_local_path(path)
-    if not normalized then return false end
-    for _, ignored in ipairs(ignored_paths) do
-        local prefix = ignored:sub(-1) == '/' and ignored or ignored .. '/'
-        if normalized == ignored
-            or normalized:sub(1, #prefix) == prefix then
-            return true
+    local value = false
+    if normalized then
+        for _, ignored in ipairs(ignored_paths) do
+            if normalized == ignored.path
+                or normalized:sub(1, #ignored.prefix) == ignored.prefix then
+                value = true
+                break
+            end
         end
     end
-    return false
+    ignored_path_cache = {path=path, working_directory=working_directory, value=value}
+    return value
 end
 
 local cache_path = o.cache_path

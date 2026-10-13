@@ -87,6 +87,23 @@ equal(ignored_config.is_ignored_path('~~/secret/episode.mkv'), true,
     'ignored mpv-prefixed path')
 equal(ignored_config.is_ignored_path('https://example.test/video.mkv'), false,
     'ignored paths do not match URLs')
+local checks_before_cache = expand_path_calls
+equal(ignored_config.is_ignored_path('/media/private/cached.mkv'), true, 'cached ignored path')
+local checks_after_cache = expand_path_calls
+ignored_config.is_ignored_path('/media/private/cached.mkv')
+equal(expand_path_calls, checks_after_cache, 'ignored path cache skips repeated expansion')
+equal(checks_after_cache, checks_before_cache + 1, 'new path is expanded once')
+local old_property, old_expand = mp.get_property, mp.command_native
+local test_cwd = '/expanded/media/private'
+mp.get_property = function(name) return name == 'working-directory' and test_cwd or nil end
+mp.command_native = function(command) expand_path_calls=expand_path_calls+1;return command[2] end
+equal(ignored_config.is_ignored_path('relative.mkv'), true, 'relative path under ignored cwd')
+test_cwd = '/media/visible'
+equal(ignored_config.is_ignored_path('relative.mkv'), false, 'working directory invalidates ignored result')
+local negative_checks = expand_path_calls
+ignored_config.is_ignored_path('relative.mkv')
+equal(expand_path_calls, negative_checks, 'negative ignored result is cached')
+mp.get_property, mp.command_native = old_property, old_expand
 configured_ignored_paths = '["/"]'
 local ignored_root_config = config_factory({}, {})
 equal(ignored_root_config.is_ignored_path('/other-root/file.mkv'), true,
@@ -152,6 +169,10 @@ equal(year, nil, 'year-shaped title has no inferred release year')
 title, year = filename.clean_filename('1917.2019.mkv')
 equal(title, '1917', 'numeric title before release year')
 equal(year, '2019', 'numeric title release year')
+title, year = filename.clean_filename('Movie (1899) (1999) (2001) (2100).mkv')
+equal(year, '2001', 'last valid parenthesized year survives out-of-range years')
+title, year = filename.clean_filename('Movie.1899.1900.2099.2100.mkv')
+equal(year, '2099', 'combined year scan preserves supported bounds')
 
 title, year, is_tv = filename.clean_filename('1923.S01E01.mkv')
 equal(title, '1923', 'numeric TV title')
@@ -192,6 +213,9 @@ local decode_cache_entry = assert(loadfile(root .. '/modules/cache.lua'))()({
 }, {}).unpack_cache_entry
 local function create_tmdb(modules, shared)
     modules.cache.unpack_cache_entry = decode_cache_entry
+    modules.cache.remember_posters = function(entries)
+        for key, value in pairs(entries) do modules.cache.remember_poster(key, value) end
+    end
     modules.tmdb_match = tmdb_match_factory(modules, shared)
     modules.tmdb_episode = tmdb_episode_factory(modules, shared)
     return tmdb_factory(modules, shared), modules
@@ -227,7 +251,7 @@ local tmdb, tmdb_modules = create_tmdb({
         tmdb_lookup_cancelled = function() return false end,
     },
     tmdb_index = {
-        candidates = function() return {} end,
+        candidates_many = function() return {} end,
         matches = function(a, b) return a == b end,
     },
     title_normalize = title_normalize,
@@ -320,6 +344,9 @@ local episode_modules = {
         persistent_entry_expired = function() return false end,
         remember_poster = function(key, value)
             episode_shared.poster_cache[key] = value
+        end,
+        remember_posters = function(entries)
+            for key, value in pairs(entries) do episode_shared.poster_cache[key] = value end
         end,
         schedule_poster_cache_save = noop,
     },

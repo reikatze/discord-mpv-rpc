@@ -1,7 +1,6 @@
 -- Logging, UTF-8 truncation, script paths, and memory-cache helpers.
 -- Each factory owns its private locals; dependencies are supplied by main.lua.
 return function(modules, shared)
-local IS_WINDOWS = modules.config.IS_WINDOWS
 local msg = modules.config.msg
 local utils = modules.config.utils
 
@@ -45,23 +44,7 @@ end
 --   .../scripts/discord-mpv-rpc/main.lua
 --   .../scripts/discord-mpv-rpc/discord-mpv-rpc-posters.json
 ----------------------------------------------------------------
-local function get_script_dir()
-    local script_dir = shared.script_dir or mp.get_script_directory()
-    if script_dir and script_dir ~= '' then
-        return script_dir
-    end
-
-    if IS_WINDOWS then
-        return (os.getenv('APPDATA') or '.') .. '\\mpv\\scripts\\discord-mpv-rpc'
-    end
-    local xdg = os.getenv('XDG_CONFIG_HOME')
-    if xdg and xdg ~= '' then
-        return xdg .. '/mpv/scripts/discord-mpv-rpc'
-    end
-    return (os.getenv('HOME') or '.') .. '/.config/mpv/scripts/discord-mpv-rpc'
-end
-
-local SCRIPT_DIR = get_script_dir()
+local SCRIPT_DIR = assert(shared.script_dir, 'main.lua must supply the script directory')
 local function trim_memory_cache(cache, max_entries)
     local now = mp.get_time()
     local count = 0

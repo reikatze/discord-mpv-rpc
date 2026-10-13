@@ -10,7 +10,6 @@ local gsub = modules.helpers.gsub
 local log_verbose = modules.helpers.log_verbose
 local log_warn = modules.helpers.log_warn
 local time = modules.helpers.time
-local trim_memory_cache = modules.helpers.trim_memory_cache
 local curl_request = modules.http.curl_request
 local run_async = modules.http.run_async
 local url_encode = modules.http.url_encode
@@ -18,13 +17,11 @@ local url_encode = modules.http.url_encode
 -- Discord crops large_image to a square. Letterbox the portrait TMDb poster
 -- onto 512x512 so title art stays readable. Use poster_fit=raw to send the
 -- original URL. If wsrv fails for a URL, fall back to the raw TMDb link.
-local wsrv_status = {} -- [url] = { ok = boolean, expires = timestamp }
 local WSRV_FAILURE_TTL = 10 * 60
 local WSRV_SUCCESS_TTL = 24 * 60 * 60
-local WSRV_STATUS_CACHE_MAX = 256
 
 -- Service-level state avoids probing every new poster when wsrv itself is
--- unavailable. Per-URL state is retained as a secondary cache.
+-- unavailable.
 local wsrv_global = {
     ok = nil,          -- nil = unknown, true = available, false = unavailable
     expires = 0,
@@ -76,16 +73,6 @@ local function wsrv_global_get()
     return wsrv_global.ok
 end
 
-local function wsrv_status_get(url)
-    local entry = wsrv_status[url]
-    if not entry then return nil end
-    if mp.get_time() >= entry.expires then
-        wsrv_status[url] = nil
-        return nil
-    end
-    return entry.ok
-end
-
 local function wsrv_url(tmdb_url)
     local bare = gsub(tmdb_url, '^https://', '')
     return 'https://wsrv.nl/?url=' .. url_encode(bare)
@@ -105,12 +92,7 @@ local function presence_image(url)
         return url
     end
 
-    local known = wsrv_status_get(url)
-    if known == false then
-        return url
-    end
-
-    -- Unknown URLs are still returned through wsrv immediately; probe_wsrv()
+    -- URLs are returned through wsrv immediately; probe_wsrv()
     -- is responsible for learning whether the service works.
     return wsrv_url(url)
 end
@@ -122,9 +104,6 @@ local function probe_wsrv(tmdb_url)
 
     local global_known = wsrv_global_get()
     if global_known ~= nil then
-        return
-    end
-    if wsrv_status_get(tmdb_url) ~= nil then
         return
     end
     if wsrv_probe_inflight then
@@ -146,19 +125,9 @@ local function probe_wsrv(tmdb_url)
 
         if ok then
             wsrv_remember_global(true, WSRV_SUCCESS_TTL)
-            wsrv_status[tmdb_url] = {
-                ok = true,
-                expires = mp.get_time() + WSRV_SUCCESS_TTL,
-            }
-            trim_memory_cache(wsrv_status, WSRV_STATUS_CACHE_MAX)
             log_verbose('wsrv probe succeeded')
         else
             wsrv_remember_global(false, WSRV_FAILURE_TTL)
-            wsrv_status[tmdb_url] = {
-                ok = false,
-                expires = mp.get_time() + WSRV_FAILURE_TTL,
-            }
-            trim_memory_cache(wsrv_status, WSRV_STATUS_CACHE_MAX)
             log_warn('wsrv failed (' .. tostring(status) .. '), using raw poster for '
                 .. WSRV_FAILURE_TTL .. 's')
         end

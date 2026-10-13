@@ -96,7 +96,10 @@ local episode = assert(loadfile(root..'/modules/tmdb_episode.lua'))()({
     cache={unpack_cache_entry=assert(loadfile(root..'/modules/cache.lua'))()({
         config={PATH_SEP='/'},helpers={SCRIPT_DIR=root},
     },{}).unpack_cache_entry,persistent_entry_expired=function(entry) return entry.expires_at and entry.expires_at<=clock end,
-        remember_poster=function(key,value) poster_shared.poster_cache[key]=value end,schedule_poster_cache_save=noop},
+        remember_poster=function(key,value) poster_shared.poster_cache[key]=value end,
+        remember_posters=function(entries)
+            for key,value in pairs(entries) do poster_shared.poster_cache[key]=value end
+        end,schedule_poster_cache_save=noop},
     helpers={format=string.format,time=function() return clock end,log_info=noop,log_verbose=noop,log_warn=noop},
     http={url_encode=function(s) return s end},
     tmdb_requests={tmdb_lookup_cancelled=function() return false end,tmdb_get_json_cached=function(url)
@@ -250,6 +253,70 @@ check(supported,'missing IPC transport does not crash startup: '..tostring(start
 check(captured_state.enabled==false and not presence_loaded,
     'missing IPC transport disables presence and skips its event handlers')
 check(type(captured_state.tick)=='function','disabled runtime provides a safe metadata tick')
+
+-- A full season update sweeps expiry once and keeps the cache bounded.
+local batch_state, expiry_reads, save_timers = {}, 0, 0
+mp.add_timeout=function() save_timers=save_timers+1;return {kill=noop} end
+local batch_cache=real_loadfile(root..'/modules/cache.lua')()({
+    config={PATH_SEP='/',PID=123},helpers={SCRIPT_DIR=root,format=string.format,
+        time=function() expiry_reads=expiry_reads+1;return 1000 end,log_verbose=noop},
+},batch_state)
+for n=1,1000 do batch_state.poster_cache['old-'..n]={expires_at=2000+n} end
+batch_state.poster_cache.expired={expires_at=999}
+local entries={}
+for n=1,20 do entries['new-'..n]={poster='/new.jpg',expires_at=5000+n} end
+batch_cache.remember_posters(entries)
+check(expiry_reads==1021,'batch prunes expiry once across existing and new records')
+check(save_timers==1,'batch schedules one persistent save')
+local total=0;for _ in pairs(batch_state.poster_cache) do total=total+1 end
+check(total==1000 and batch_state.poster_cache.expired==nil,'batch respects size and expiry limits')
+check(batch_state.poster_cache['new-1']~=nil and batch_state.poster_cache['new-20']~=nil,
+    'batch retains longer-lived season records')
+batch_cache.remember_posters({})
+check(expiry_reads==1021 and save_timers==1,'empty batch does no cache work')
+
+-- Directory parsing is shared across episode paths, including a bounded cache.
+local normalized_dirs=0
+local normalization=real_loadfile(root..'/modules/title_normalize.lua')()()
+local original_trim=normalization.trim
+normalization.trim=function(value) normalized_dirs=normalized_dirs+1;return original_trim(value) end
+local filenames=real_loadfile(root..'/modules/filename.lua')()({
+    helpers={floor=math.floor,get_property=noop,get_property_number=noop,
+        gsub=string.gsub,match=string.match,sub=string.sub},
+    database={parsing=real_loadfile(root..'/db/parsing_keywords.lua')()},title_normalize=normalization,
+},{})
+local dir_title,dir_year=filenames.directory_context('/media/Show (2024)/S01E01.mkv')
+check(dir_title=='Show' and dir_year=='2024','directory cache preserves title and year')
+local first_dir_calls=normalized_dirs
+filenames.directory_context('/media/Show (2024)/S01E02.mkv')
+check(normalized_dirs==first_dir_calls,'episodes share parsed directory metadata')
+for n=1,256 do filenames.directory_context('/media/Other '..n..' (2020)/file.mkv') end
+local before_evicted=normalized_dirs
+filenames.directory_context('/media/Show (2024)/S01E03.mkv')
+check(normalized_dirs>before_evicted,'directory cache evicts entries at its bound')
+
+-- One service status governs every image, with failure expiry and recovery.
+local artwork_state={poster_cache={},tick=noop}
+local probes,status=0,503
+mp.get_time=function() return clock end
+local images=real_loadfile(root..'/modules/artwork.lua')()({
+    cache={load_poster_cache=noop,persistent_entry_expired=function(e) return e.expires_at<=clock end,
+        remember_poster=function(k,v) artwork_state.poster_cache[k]=v end},
+    config={FALLBACK_IMG='fallback',POSTER_FIT='contain'},
+    helpers={gsub=string.gsub,time=function() return clock end,log_verbose=noop,log_warn=noop},
+    http={url_encode=function(s) return s end,run_async=function(fn) fn() end,
+        curl_request=function() probes=probes+1;return '',status,false end},
+},artwork_state)
+images.probe_wsrv('https://image.test/one.jpg')
+check(images.presence_image('https://image.test/two.jpg')=='https://image.test/two.jpg',
+    'service failure applies raw fallback to every poster')
+images.probe_wsrv('https://image.test/two.jpg')
+check(probes==1,'known service status skips another image probe')
+clock=clock+601;status=200;images.probe_wsrv('https://image.test/two.jpg')
+check(probes==2 and images.presence_image('https://image.test/two.jpg'):find('https://wsrv.nl/',1,true)==1,
+    'expired service failure reprobes and restores contained artwork')
+images.probe_wsrv('https://image.test/three.jpg')
+check(probes==2,'service recovery is shared with subsequent posters')
 
 mp=saved_mp
 return passed

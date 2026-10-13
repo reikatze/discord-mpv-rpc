@@ -131,16 +131,12 @@ fi
 test_tmp=$(mktemp -d "/tmp/discord-mpv-rpc-tests.XXXXXX")
 trap 'rm -rf -- "$test_tmp"' EXIT
 
-scene_media="$test_tmp/[Judas] Dragon Ball Daima - S01E04v2.mkv"
-movie_media="$test_tmp/Birdman (or the Unexpected Virtue of Ignorance) (2014) 1080p BluRay.mkv"
-ignored_media="$test_tmp/ignored/private.mkv"
-mkdir -p "$test_tmp/ignored" "$test_tmp/mpv-config/script-opts"
-ln -s -- "$media_file" "$scene_media"
-ln -s -- "$media_file" "$movie_media"
-ln -s -- "$media_file" "$ignored_media"
-ln -s -- "$script_dir/mpv/fake-curl.sh" "$test_tmp/curl"
-cp -- "$script_dir/mpv/ignored.conf" \
-    "$test_tmp/mpv-config/script-opts/discord-mpv-rpc.conf"
+mkdir -p "$test_tmp/config/script-opts"
+cp -- "$script_dir/mpv/fake-curl.sh" "$test_tmp/curl"
+chmod +x "$test_tmp/curl"
+export MPV_BIN="$mpv_bin" MPV_TEST_MEDIA="$media_file" MPV_TEST_WORK="$test_tmp"
+export FFMPEG_BIN="$ffmpeg_bin" MPV_TEST_CURL_LOG="$test_tmp/curl.log"
+export PATH="$test_tmp:$PATH"
 
 common=(
     --no-config
@@ -150,11 +146,6 @@ common=(
     --terminal=yes
     --msg-color=no
 )
-main_options=(
-    --script="$root_dir/main.lua"
-    --script-opts=discord-mpv-rpc-enabled=no,discord-mpv-rpc-tmdb_local_index=no
-)
-
 passed=0
 skipped=0
 run_case() {
@@ -183,114 +174,14 @@ run_case() {
     passed=$((passed + 1))
 }
 
-run_case unit-suite MPV_TEST_UNIT_OK \
-    --idle=yes \
-    --script="$script_dir/mpv/unit_runner.lua"
-
-run_case main-idle MPV_TEST_IDLE_OK \
-    --idle=yes \
-    "${main_options[@]}" \
-    --script="$script_dir/mpv/probe.lua" \
-    --script-opts-append=mpv-rpc-test-mode=idle
-
-run_case playback-lifecycle MPV_TEST_PLAYBACK_OK \
-    --frames=3 \
-    "${main_options[@]}" \
-    --script="$script_dir/mpv/probe.lua" \
-    --script-opts-append=mpv-rpc-test-mode=playback \
-    "$media_file"
-
-run_case scene-filename MPV_TEST_FILENAME_OK \
-    --frames=3 \
-    "${main_options[@]}" \
-    --script="$script_dir/mpv/probe.lua" \
-    --script-opts-append=mpv-rpc-test-mode=filename \
-    --script-opts-append='mpv-rpc-test-expected_title=Dragon Ball Daima' \
-    --script-opts-append=mpv-rpc-test-expected_tv=yes \
-    --script-opts-append=mpv-rpc-test-expected_season=1 \
-    --script-opts-append=mpv-rpc-test-expected_episode=4 \
-    "$scene_media"
-
-run_case movie-filename MPV_TEST_FILENAME_OK \
-    --frames=3 \
-    "${main_options[@]}" \
-    --script="$script_dir/mpv/probe.lua" \
-    --script-opts-append=mpv-rpc-test-mode=filename \
-    --script-opts-append='mpv-rpc-test-expected_title=Birdman (or the Unexpected Virtue of Ignorance)' \
-    --script-opts-append=mpv-rpc-test-expected_year=2014 \
-    "$movie_media"
-
-ignored_log="$test_tmp/ignored-path.log"
-ignored_curl_log="$test_tmp/ignored-path-curl.log"
-printf 'test: %-28s ' ignored-directory
-if ! PATH="$test_tmp:$PATH" MPV_TEST_CURL_LOG="$ignored_curl_log" \
-    "$mpv_bin" "${common[@]}" \
-    --config-dir="$test_tmp/mpv-config" \
-    --config=yes \
-    --length=2 \
-    --script="$root_dir/main.lua" \
-    --script="$script_dir/mpv/probe.lua" \
-    --script-opts-append=mpv-rpc-test-mode=playback \
-    "$ignored_media" >"$ignored_log" 2>&1; then
-    printf 'FAIL\n' >&2
-    sed -n '1,240p' "$ignored_log" >&2
+# Playback cases are defined once in the cross-platform Lua runner.
+run_case portable-suite MPV_TEST_PORTABLE_SUITE_OK \
+    --idle=yes --script="$script_dir/mpv/portable_runner.lua"
+if [[ -s $MPV_TEST_CURL_LOG ]]; then
+    printf 'FAIL: excluded media started an HTTP request\n' >&2
     exit 1
 fi
-if grep -Eq 'MPV_TEST_FAILURE|Lua error|stack traceback|cannot load .+\.lua|Discord unavailable|connected to Discord' "$ignored_log" \
-    || ! grep -Fq MPV_TEST_PLAYBACK_OK "$ignored_log" \
-    || [[ -s $ignored_curl_log ]]; then
-    printf 'FAIL\n' >&2
-    sed -n '1,240p' "$ignored_log" >&2
-    exit 1
-fi
-printf 'ok\n'
-passed=$((passed + 1))
-
-run_case presence-toggle MPV_TEST_TOGGLE_OK \
-    --idle=yes \
-    "${main_options[@]}" \
-    --script="$script_dir/mpv/probe.lua" \
-    --script-opts-append=mpv-rpc-test-mode=toggle
-
-if [[ -n $ffmpeg_bin ]]; then
-    stream_port=${MPV_TEST_STREAM_PORT:-$((38000 + $$ % 1000))}
-    stream_log="$test_tmp/stream.log"
-    stream_server_log="$test_tmp/stream-server.log"
-    stream_curl_log="$test_tmp/stream-curl.log"
-    printf 'test: %-28s ' live-network-stream
-    "$ffmpeg_bin" -hide_banner -loglevel error -re -stream_loop -1 \
-        -i "$media_file" -map 0:v:0 -c:v copy -an -f mpegts -listen 1 \
-        "http://127.0.0.1:$stream_port" >"$stream_server_log" 2>&1 &
-    stream_server_pid=$!
-    sleep 0.5
-    if ! PATH="$test_tmp:$PATH" MPV_TEST_CURL_LOG="$stream_curl_log" \
-        "$mpv_bin" "${common[@]}" \
-        --length=2 \
-        --script="$root_dir/main.lua" \
-        --script="$script_dir/mpv/probe.lua" \
-        --script-opts=discord-mpv-rpc-enabled=yes,discord-mpv-rpc-tmdb_local_index=no,discord-mpv-rpc-tmdb_api_key=stream-test-key \
-        --script-opts-append=mpv-rpc-test-mode=stream \
-        "http://127.0.0.1:$stream_port/live.ts" >"$stream_log" 2>&1; then
-        kill "$stream_server_pid" 2>/dev/null || true
-        wait "$stream_server_pid" 2>/dev/null || true
-        printf 'FAIL\n' >&2
-        sed -n '1,240p' "$stream_log" >&2
-        sed -n '1,120p' "$stream_server_log" >&2
-        exit 1
-    fi
-    kill "$stream_server_pid" 2>/dev/null || true
-    wait "$stream_server_pid" 2>/dev/null || true
-    if grep -Eq 'MPV_TEST_FAILURE|Lua error|stack traceback|cannot load .+\.lua|Discord unavailable|connected to Discord' "$stream_log" \
-        || ! grep -Fq MPV_TEST_STREAM_OK "$stream_log" \
-        || [[ -s $stream_curl_log ]]; then
-        printf 'FAIL\n' >&2
-        sed -n '1,240p' "$stream_log" >&2
-        sed -n '1,120p' "$stream_server_log" >&2
-        exit 1
-    fi
-    printf 'ok\n'
-    passed=$((passed + 1))
-else
+if [[ -z $ffmpeg_bin ]]; then
     printf 'test: %-28s skip (ffmpeg not found)\n' live-network-stream
     skipped=$((skipped + 1))
 fi
@@ -305,6 +196,6 @@ else
     skipped=$((skipped + 1))
 fi
 
-printf 'ok - %d mpv test cases' "$passed"
+printf 'ok - %d mpv test suites' "$passed"
 if ((skipped > 0)); then printf ' (%d skipped)' "$skipped"; fi
 printf '\n'

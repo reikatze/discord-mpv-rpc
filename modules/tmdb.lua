@@ -213,25 +213,6 @@ local function build_query_titles(title, directory_title)
     return candidate_titles(build_query_candidates(title, directory_title))
 end
 
-local function collect_index_ids(query_titles, is_tv)
-    if modules.tmdb_index.candidates_many then
-        return modules.tmdb_index.candidates_many(query_titles,is_tv)
-    end
-    local values, seen = {}, {}
-    for i = 1, #query_titles do
-        local ids = modules.tmdb_index.candidates(query_titles[i], is_tv)
-        for n = 1, #ids do
-            local id = ids[n]
-            if not seen[id] then
-                seen[id] = true
-                values[#values + 1] = id
-            end
-        end
-    end
-    table.sort(values)
-    return values
-end
-
 local function show_cache_key(
     title, year, preferred_type, directory_title, index_ids
 )
@@ -268,7 +249,7 @@ local function tmdb_lookup(
 
     local query_candidates = build_query_candidates(title, directory_title)
     local query_titles = candidate_titles(query_candidates)
-    local index_ids = collect_index_ids(query_titles, is_tv)
+    local index_ids = modules.tmdb_index.candidates_many(query_titles, is_tv)
     local preferred_type = is_tv and 'tv' or 'movie'
     local key, cache_directory = show_cache_key(
         title, year, preferred_type, directory_title, index_ids

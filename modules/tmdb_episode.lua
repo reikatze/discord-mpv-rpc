@@ -3,6 +3,7 @@ return function(modules, shared)
 local persistent_entry_expired = modules.cache.persistent_entry_expired
 local unpack_cache_entry = modules.cache.unpack_cache_entry
 local remember_poster = modules.cache.remember_poster
+local remember_posters = modules.cache.remember_posters
 local schedule_poster_cache_save = modules.cache.schedule_poster_cache_save
 local TMDB_EPISODE_LOOKUP = modules.config.TMDB_EPISODE_LOOKUP
 local TMDB_KEY = modules.config.TMDB_KEY
@@ -62,6 +63,7 @@ local function season_episode_count(show_id, season, lookup_token, show_hit)
     local data, outcome = tmdb_get_json_cached(url, lookup_token, false)
     if outcome == 'cancelled' or tmdb_lookup_cancelled(lookup_token) then return nil end
     local count
+    local entries = {}
     if data and tonumber(data.season_number) == tonumber(season)
         and type(data.episodes) == 'table' and #data.episodes > 0 then
         count = #data.episodes
@@ -78,19 +80,20 @@ local function season_episode_count(show_id, season, lookup_token, show_hit)
                     if type(item.still_path) == 'string' and item.still_path ~= '' then
                         poster = 'https://image.tmdb.org/t/p/w500' .. item.still_path
                     end
-                    remember_poster(persistent_key(show_id, season, number), {
+                    entries[persistent_key(show_id, season, number)] = {
                         poster = poster, title = show_hit.title, type = 'tv',
                         id = show_id, episode = item.name, expires_at = expires,
                         url = show_hit.url .. '/season/' .. season .. '/episode/' .. number,
-                    })
+                    }
                 end
             end
         end
     end
-    remember_poster(key, {
+    entries[key] = {
         count = count,
         expires_at = time() + (count and 24 * 60 * 60 or 60 * 60),
-    })
+    }
+    remember_posters(entries)
     return count
 end
 

@@ -8,7 +8,8 @@ local root=script_dir:gsub('[/\\]tests[/\\]mpv$','')
 local executable=assert(os.getenv('MPV_BIN'))
 local media=assert(os.getenv('MPV_TEST_MEDIA'))
 local work=assert(os.getenv('MPV_TEST_WORK'))
-local ffmpeg=assert(os.getenv('FFMPEG_BIN'))
+local ffmpeg=os.getenv('FFMPEG_BIN')
+if ffmpeg=='' then ffmpeg=nil end
 local sep='/'
 local server_handle,child_handle,case_timer
 local child_log
@@ -36,7 +37,7 @@ local ignored=work..sep..'private.mkv'
 copy(scene);copy(movie);copy(ignored)
 local config=work..'/config'
 local f=assert(io.open(config..'/script-opts/discord-mpv-rpc.conf','wb'))
-f:write('enabled=yes\ntmdb_local_index=no\ntmdb_api_key=ignored-test-key\nignored_paths='..assert(utils.format_json({ignored}))..'\n');f:close()
+f:write('enabled=yes\ntmdb_local_index=no\ntmdb_api_key=ignored-test-key\nignored_paths='..assert(utils.format_json({work}))..'\n');f:close()
 local probe='--script='..script_dir..'/probe.lua'
 local main={'--script='..root..'/main.lua','--script-opts=discord-mpv-rpc-enabled=no,discord-mpv-rpc-tmdb_local_index=no'}
 local cases={
@@ -49,15 +50,15 @@ local cases={
     {name='presence toggle',marker='MPV_TEST_TOGGLE_OK',main=true,args={'--idle=yes',probe,'--script-opts-append=mpv-rpc-test-mode=toggle'}},
 }
 local port=38000+utils.getpid()%1000
-cases[#cases+1]={name='network stream',marker='MPV_TEST_STREAM_OK',stream=true,excluded=true,args={
+if ffmpeg then cases[#cases+1]={name='network stream',marker='MPV_TEST_STREAM_OK',stream=true,excluded=true,args={
     '--length=2','--script='..root..'/main.lua',probe,
     '--script-opts=discord-mpv-rpc-enabled=yes,discord-mpv-rpc-tmdb_local_index=no,discord-mpv-rpc-tmdb_api_key=stream-test-key',
-    '--script-opts-append=mpv-rpc-test-mode=stream','http://127.0.0.1:'..port..'/live.ts'}}
+    '--script-opts-append=mpv-rpc-test-mode=stream','http://127.0.0.1:'..port..'/live.ts'}} end
 local index=0
 local function next_case()
     index=index+1
     if index>#cases then
-        completed=true;mp.msg.info('MPV_TEST_PORTABLE_SUITE_OK 8 cases');mp.commandv('quit',0);return
+        completed=true;mp.msg.info('MPV_TEST_PORTABLE_SUITE_OK '..#cases..' cases');mp.commandv('quit',0);return
     end
     local test=cases[index]
     child_log=work..'/portable-'..index..'.log'

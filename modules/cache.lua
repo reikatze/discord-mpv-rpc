@@ -183,11 +183,22 @@ local function schedule_poster_cache_save()
     end)
 end
 
-local function remember_poster(key, value)
-    shared.poster_cache[key] = value
+local function finish_poster_update()
     trim_poster_cache()
     shared.poster_cache_dirty = true
     schedule_poster_cache_save()
+end
+
+local function remember_poster(key, value)
+    shared.poster_cache[key] = value
+    finish_poster_update()
+end
+
+-- Season responses populate several records; prune and trim once per response.
+local function remember_posters(entries)
+    if next(entries) == nil then return end
+    for key, value in pairs(entries) do shared.poster_cache[key] = value end
+    finish_poster_update()
 end
 
 return {
@@ -196,6 +207,7 @@ return {
     load_poster_cache = load_poster_cache,
     persistent_entry_expired = persistent_entry_expired,
     remember_poster = remember_poster,
+    remember_posters = remember_posters,
     save_poster_cache = save_poster_cache,
     schedule_poster_cache_save = schedule_poster_cache_save,
     _test = {

@@ -40,6 +40,16 @@ and TV filename parsing, ignored paths, presence toggles, and a local HTTP
 stream. It generates its own small video and writes an ignored-path
 configuration using the platform's actual absolute path.
 
+For local Unix runs, `bash tests/run-mpv-tests.sh --mpv PATH --media PATH`
+invokes that same portable runner. It also intercepts curl to assert that
+excluded media starts no HTTP requests, and retains the optional `--database`
+check against an existing index. Neither local runner builds mpv or downloads
+a database. Without ffmpeg, the local runner skips the HTTP stream case.
+
+The regression suite also checks batched cache pruning and bounded size,
+ignored-path reuse and invalidation after a working-directory change, bounded
+directory-metadata reuse, year parsing, and artwork-proxy failure/recovery.
+
 The native IPC runner starts a local fake Discord peer and launches the real
 production IPC client in a separate mpv process. Six scenarios check:
 

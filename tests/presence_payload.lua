@@ -72,6 +72,9 @@ local function harness(fit, small_icons)
     modules.cache={TMDB_NEGATIVE_CACHE_TTL=86400,unpack_cache_entry=cache_decoder,
         persistent_entry_expired=function(e) return e.expires_at and e.expires_at<=now end,
         remember_poster=function(k,v) shared.poster_cache[k]=v end,
+        remember_posters=function(entries)
+            for k,v in pairs(entries) do shared.poster_cache[k]=v end
+        end,
         load_poster_cache=noop,save_poster_cache=noop,schedule_poster_cache_save=noop}
     modules.http={run_async=function(fn) jobs[#jobs+1]=fn end,
         url_encode=function(s) return (tostring(s):gsub('[^%w%-%.%_%~]',function(c)
@@ -100,7 +103,7 @@ local function harness(fit, small_icons)
             if url:find('/alternative_titles?',1,true) then return {titles={},results={}},'ok' end
             error('unexpected fixture API request: '..url)
         end}
-    modules.tmdb_index={candidates=function() return {} end}
+    modules.tmdb_index={candidates_many=function() return {} end}
     modules.title_normalize=load('title_normalize',modules,shared)
     modules.database={parsing=assert(loadfile(root..'/db/parsing_keywords.lua'))()}
     modules.filename=load('filename',modules,shared)

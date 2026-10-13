@@ -12,6 +12,7 @@ local title_normalize = modules.title_normalize
 -- Parsed filename cache: mpv can trigger several events for the same path.
 local parsed_filename_cache = {}
 local PARSED_FILENAME_CACHE_MAX = 256
+local directory_cache, directory_slots, directory_slot = {}, {}, 1
 
 -- Filename -> title / year / is_tv
 ----------------------------------------------------------------
@@ -96,36 +97,30 @@ end
 local function extract_year(name)
     -- Parenthesized years are explicit. If more than one is present, the last
     -- is normally the release year rather than a numeric title component.
-    local year, year_start, year_end
+    local year, year_start
     local from = 1
     while true do
-        local first, last, value
-        local a1, b1, y1 = name:find('%((19%d%d)%)', from)
-        local a2, b2, y2 = name:find('%((20%d%d)%)', from)
-        if a1 and (not a2 or a1 < a2) then first,last,value=a1,b1,y1
-        elseif a2 then first,last,value=a2,b2,y2 end
+        local first, last, value = name:find('%((%d%d%d%d)%)', from)
         if not first then break end
-        year, year_start, year_end = value, first, last
+        if value >= '1900' and value <= '2099' then year, year_start = value, first end
         from = last + 1
     end
-    if year then return year, year_start, year_end end
+    if year then return year, year_start end
 
     -- For bare years, use the final plausible token and require meaningful
     -- title text before it. Thus "1917.2019" selects 2019, while a title that
     -- is itself just "1917" is not erased.
     from = 1
     while true do
-        local first, last, value = name:find('%f[%d](19%d%d)%f[%D]', from)
-        local a2, b2, y2 = name:find('%f[%d](20%d%d)%f[%D]', from)
-        if not first or (a2 and a2 < first) then first,last,value=a2,b2,y2 end
+        local first, last, value = name:find('%f[%d](%d%d%d%d)%f[%D]', from)
         if not first then break end
         local before = sub(name, 1, first - 1)
-        if before:find('[%w\128-\255]') then
-            year, year_start, year_end = value, first, last
+        if value >= '1900' and value <= '2099' and before:find('[%w\128-\255]') then
+            year, year_start = value, first
         end
         from = last + 1
     end
-    return year, year_start, year_end
+    return year, year_start
 end
 
 local function derive_title(name, year, is_tv, year_start)
@@ -225,10 +220,7 @@ local function normalize_filename_title(title)
     return title_normalize.trim(title)
 end
 
-local function directory_context(path)
-    local dir = parent_directory(path)
-    if not dir or dir == '' then return nil, nil end
-
+local function parse_directory_context(dir)
     local name = match(dir, '([^/\\]+)$') or dir
     local year, year_start = extract_year(name)
     if not year then return nil, nil end
@@ -237,6 +229,22 @@ local function directory_context(path)
     title = normalize_filename_title(title)
     if title == '' then return nil, year end
     return title, year
+end
+
+local function directory_context(path)
+    local dir = parent_directory(path)
+    if not dir or dir == '' then return nil, nil end
+    local cached = directory_cache[dir]
+    if not cached then
+        local title, year = parse_directory_context(dir)
+        cached = {title=title, year=year}
+        local evicted = directory_slots[directory_slot]
+        if evicted then directory_cache[evicted] = nil end
+        directory_slots[directory_slot] = dir
+        directory_cache[dir] = cached
+        directory_slot = directory_slot % PARSED_FILENAME_CACHE_MAX + 1
+    end
+    return cached.title, cached.year
 end
 
 local function trim_parsed_filename_cache()
