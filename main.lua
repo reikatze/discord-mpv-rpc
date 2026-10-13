@@ -28,10 +28,14 @@ load_module('ipc_transport_unix')
 load_module('ipc_transport_windows')
 load_module('ipc_transport')
 load_module('ipc')
+if not modules.ipc then
+    state.enabled = false
+    state.tick = function() end
+end
 load_module('artwork')
 load_module('tmdb_requests')
 load_module('tmdb_match')
 load_module('tmdb_episode')
 load_module('tmdb')
 load_module('metadata')
-load_module('presence')
+if modules.ipc then load_module('presence') end

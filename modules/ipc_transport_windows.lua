@@ -59,8 +59,7 @@ local function to_utf16_units(value)
     return units
 end
 
-local function create(api, options)
-    options = options or {}
+local function create(api)
     local transport = {unix = false}
     function transport:connect()
         for i = 0, 9 do
@@ -86,34 +85,12 @@ local function create(api, options)
     function transport:send_some(data, offset)
         return api.write(self.socket, data, offset, math.min(65536, #data - offset))
     end
-    function transport:send_raw(data)
-        if not self.socket then return false end
-        local sent = 0
-        while sent < #data do
-            local count = api.write(
-                self.socket, data, sent, math.min(65536, #data - sent))
-            if not count or count <= 0 then return false end
-            sent = sent + count
-        end
-        return true
-    end
-    function transport:recv_raw(size)
-        if not self.socket or size <= 0 then return nil end
-        local parts, received = {}, 0
-        while received < size do
-            local data = api.read(self.socket, math.min(4096, size - received))
-            if not data or #data == 0 then return nil end
-            parts[#parts + 1], received = data, received + #data
-        end
-        return table.concat(parts)
-    end
     function transport:close()
         if self.socket then
             api.close(self.socket)
             self.socket = nil
         end
     end
-    if options.background_reader == false then transport.read_available = nil end
     return transport
 end
 
@@ -243,28 +220,8 @@ local function native()
     return create(api)
 end
 
-local function file_fallback()
-    local api = {}
-    function api.open(path) return io.open(path, 'r+b') end
-    function api.write(handle, data, offset, count)
-        local chunk = data:sub(offset + 1, offset + count)
-        local ok = pcall(function()
-            assert(handle:write(chunk))
-            assert(handle:flush())
-        end)
-        return ok and #chunk or nil
-    end
-    function api.read(handle, count)
-        local ok, data = pcall(function() return handle:read(count) end)
-        return ok and data or nil
-    end
-    function api.close(handle) pcall(function() handle:close() end) end
-    return create(api, {background_reader = false})
-end
-
 return {
     create = create,
-    file_fallback = file_fallback,
     native = native,
     to_utf16_units = to_utf16_units,
 }

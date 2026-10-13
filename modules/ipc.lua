@@ -7,7 +7,6 @@ local byte = modules.helpers.byte
 local char = modules.helpers.char
 local floor = modules.helpers.floor
 local format_json = modules.helpers.format_json
-local log_error = modules.helpers.log_error
 local log_info = modules.helpers.log_info
 local log_verbose = modules.helpers.log_verbose
 local log_warn = modules.helpers.log_warn
@@ -289,7 +288,6 @@ end
 
 return {
     RPC = RPC,
-    rpc_backoff_active = rpc_backoff_active,
     rpc_retry_delay = rpc_retry_delay,
 }
 end

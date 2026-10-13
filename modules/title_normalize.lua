@@ -56,10 +56,6 @@ return {
     trim = trim,
     normalize_index = normalize_index,
     normalize_match = normalize_match,
-    same = function(a, b)
-        local left, right = normalize_match(a), normalize_match(b)
-        return left ~= '' and left == right
-    end,
     leading_bracket_alternative = leading_bracket_alternative,
 }
 end

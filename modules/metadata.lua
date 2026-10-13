@@ -59,11 +59,7 @@ local function lookup_poster()
     if not path then return end
 
     local title, year, is_tv, season, ep = clean_filename(path)
-    local directory_title = nil
-    do
-        local dir_title = directory_context(path)
-        directory_title = dir_title
-    end
+    local directory_title = directory_context(path)
     if title and title ~= '' then
         shared.current_clean_title = title
     end
@@ -92,7 +88,6 @@ local function lookup_poster()
 end
 
 return {
-    eligible = eligible,
     clear_title_state = clear_title_state,
     lookup_poster = lookup_poster,
 }

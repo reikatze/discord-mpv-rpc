@@ -108,8 +108,6 @@ local function presence_image(url)
     local known = wsrv_status_get(url)
     if known == false then
         return url
-    elseif known == true or global_known == true then
-        return wsrv_url(url)
     end
 
     -- Unknown URLs are still returned through wsrv immediately; probe_wsrv()

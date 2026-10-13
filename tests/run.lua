@@ -187,7 +187,11 @@ local tmdb_factory = assert(loadfile(root .. '/modules/tmdb.lua'))()
 local tmdb_match_factory = assert(loadfile(root .. '/modules/tmdb_match.lua'))()
 local tmdb_episode_factory = assert(loadfile(root .. '/modules/tmdb_episode.lua'))()
 local noop = function() end
+local decode_cache_entry = assert(loadfile(root .. '/modules/cache.lua'))()({
+    config = {PATH_SEP = '/'}, helpers = {SCRIPT_DIR = root},
+}, {}).unpack_cache_entry
 local function create_tmdb(modules, shared)
+    modules.cache.unpack_cache_entry = decode_cache_entry
     modules.tmdb_match = tmdb_match_factory(modules, shared)
     modules.tmdb_episode = tmdb_episode_factory(modules, shared)
     return tmdb_factory(modules, shared), modules
@@ -350,6 +354,7 @@ local episode_modules = {
         tmdb_lookup_cancelled = function() return false end,
     },
 }
+episode_modules.cache.unpack_cache_entry = decode_cache_entry
 local episode_module = tmdb_episode_factory(episode_modules, episode_shared)
 equal(episode_module.persistent_key(20, 1, 4), 'episode:20:S01E04:en-US',
     'extracted episode module owns language-aware cache keys')
@@ -722,12 +727,6 @@ equal(builder_text, '["alpha",[1,3]]\n["zulu",[2]]\n',
     'native string index ordering')
 
 -- Discord replies are associated with the exact command context by nonce.
-local saved_socket_unix_preload = package.preload['socket.unix']
-local saved_socket_unix_loaded = package.loaded['socket.unix']
-package.loaded['socket.unix'] = nil
-package.preload['socket.unix'] = function()
-    return function() return {} end
-end
 local parsed_rpc_response
 local ipc_factory = assert(loadfile(root .. '/modules/ipc.lua'))()
 local ipc = assert(ipc_factory({
@@ -786,8 +785,6 @@ equal(test_rpc:drain_frames(), true, 'quiet Discord connection frame drain')
 equal(test_rpc.pending.stale, nil, 'quiet Discord connection prunes stale command')
 equal(test_rpc.pending.fresh ~= nil, true,
     'quiet Discord connection retains fresh command')
-package.preload['socket.unix'] = saved_socket_unix_preload
-package.loaded['socket.unix'] = saved_socket_unix_loaded
 
 -- Several related mpv events in one burst result in one presence update. A
 -- rejected current payload retries once; a late rejection for an older payload
@@ -878,7 +875,7 @@ assert(assert(loadfile(root .. '/modules/presence.lua'))()({
         time = function() return 1000 end,
         truncate_utf8 = function(value) return value end,
     },
-    ipc = {RPC = presence_rpc, rpc_backoff_active = function() return false end},
+    ipc = {RPC = presence_rpc, rpc_retry_delay = function() return 1 end},
     metadata = {
         clear_title_state = function()
             presence_clear_title_count = presence_clear_title_count + 1

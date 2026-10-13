@@ -1,6 +1,5 @@
 -- Unix Discord IPC transport with an injectable system-call adapter.
 return function(modules)
-local floor = modules.helpers.floor
 local log_verbose = modules.helpers.log_verbose
 
 local function ipc_paths(getenv)
@@ -23,7 +22,6 @@ local function create(api, options)
     options = options or {}
     local is_osx = options.is_osx == true
     local path_limit = is_osx and 104 or 108
-    local now = options.now or mp.get_time
     local getenv = options.getenv or os.getenv
     local transport = {unix = true}
 
@@ -60,46 +58,6 @@ local function create(api, options)
 
     function transport:send_some(data, offset)
         return api.send(self.socket, data, offset, math.min(65536, #data - offset))
-    end
-
-    function transport:send_raw(data)
-        if not self.socket then return false end
-        local sent, deadline = 0, now() + 1.5
-        while sent < #data do
-            local count, err = api.send(
-                self.socket, data, sent, math.min(65536, #data - sent))
-            if count and count > 0 then
-                sent = sent + count
-            elseif err == 'interrupted' then
-                -- Retry immediately.
-            elseif err == 'again' then
-                local remaining = floor((deadline - now()) * 1000)
-                if remaining <= 0
-                    or not api.wait_writable(self.socket, remaining) then
-                    return false
-                end
-            else
-                return false
-            end
-        end
-        return true
-    end
-
-    function transport:recv_raw(size)
-        if not self.socket or size <= 0 then return nil end
-        local parts, received, deadline = {}, 0, now() + 1.5
-        while received < size do
-            local remaining = floor((deadline - now()) * 1000)
-            if remaining <= 0
-                or not api.wait_readable(self.socket, remaining) then
-                return nil
-            end
-            local data = api.recv(self.socket, size - received)
-            if not data or #data == 0 then return nil end
-            parts[#parts + 1] = data
-            received = received + #data
-        end
-        return table.concat(parts)
     end
 
     function transport:close()
@@ -143,7 +101,7 @@ local function native()
     local byte_pointer = ffi.typeof('const uint8_t*')
     local poll_fd = ffi.new('struct pollfd[1]')
     local receive_buffer = ffi.new('char[?]', 4096)
-    local POLLIN, POLLOUT, POLLERR, POLLHUP = 0x001, 0x004, 0x008, 0x010
+    local POLLIN, POLLERR, POLLHUP = 0x001, 0x008, 0x010
     local api = {}
 
     function api.open(path, settings)
@@ -169,23 +127,12 @@ local function native()
         return fd
     end
 
-    local function poll(handle, events, timeout, include_failures)
-        poll_fd[0].fd, poll_fd[0].events, poll_fd[0].revents = handle, events, 0
+    function api.wait_readable(handle, timeout)
+        poll_fd[0].fd, poll_fd[0].events, poll_fd[0].revents = handle, POLLIN, 0
         local result = C.poll(poll_fd, 1, timeout)
         if result == 0 then return false end
         if result < 0 then return nil end
-        if not include_failures
-            and bit.band(poll_fd[0].revents, POLLERR + POLLHUP) ~= 0 then
-            return nil
-        end
-        return bit.band(poll_fd[0].revents,
-            include_failures and (events + POLLERR + POLLHUP) or events) ~= 0
-    end
-    function api.wait_readable(handle, timeout)
-        return poll(handle, POLLIN, timeout, true)
-    end
-    function api.wait_writable(handle, timeout)
-        return poll(handle, POLLOUT, timeout, false)
+        return bit.band(poll_fd[0].revents, POLLIN + POLLERR + POLLHUP) ~= 0
     end
     function api.send(handle, data, offset, count)
         local result = C.send(handle, ffi.cast(byte_pointer, data) + offset, count, 0)
@@ -229,7 +176,6 @@ local function luasocket()
     function transport:read_available()
         self.socket:settimeout(0)
         local data, err, partial = self.socket:receive(4096)
-        self.socket:settimeout(1.5)
         local chunk = data or partial
         if chunk and #chunk > 0 then return chunk end
         return err == 'timeout' and '' or nil
@@ -239,24 +185,6 @@ local function luasocket()
         local count, err, partial = self.socket:send(data:sub(offset + 1))
         if count or (partial and partial > 0) then return count or partial end
         return nil, err == 'timeout' and 'again' or 'failed'
-    end
-    function transport:send_raw(data)
-        if not self.socket then return false end
-        return self.socket:send(data) == #data
-    end
-    function transport:recv_raw(size)
-        if not self.socket or size <= 0 then return nil end
-        self.socket:settimeout(1.5)
-        local parts, received = {}, 0
-        while received < size do
-            local data, err, partial = self.socket:receive(size - received)
-            local chunk = data or partial
-            if chunk and #chunk > 0 then
-                parts[#parts + 1], received = chunk, received + #chunk
-            end
-            if received >= size then return table.concat(parts) end
-            if err then return nil end
-        end
     end
     function transport:close()
         if self.socket then

@@ -4,6 +4,7 @@ return function(modules, shared)
 local TMDB_NEGATIVE_CACHE_TTL = modules.cache.TMDB_NEGATIVE_CACHE_TTL
 local load_poster_cache = modules.cache.load_poster_cache
 local persistent_entry_expired = modules.cache.persistent_entry_expired
+local unpack_cache_entry = modules.cache.unpack_cache_entry
 local remember_poster = modules.cache.remember_poster
 local schedule_poster_cache_save = modules.cache.schedule_poster_cache_save
 local TMDB_KEY = modules.config.TMDB_KEY
@@ -19,16 +20,6 @@ local tmdb_get_json_cached = modules.tmdb_requests.tmdb_get_json_cached
 local tmdb_lookup_cancelled = modules.tmdb_requests.tmdb_lookup_cancelled
 local normalize_match_title = modules.title_normalize.normalize_match
 local leading_bracket_alternative = modules.title_normalize.leading_bracket_alternative
-
-local function unpack_cache_entry(cached)
-    if type(cached) == 'string' and #cached > 0 then
-        return { poster = cached }
-    end
-    if type(cached) == 'table' and cached.poster and #cached.poster > 0 then
-        return cached
-    end
-    return nil
-end
 
 local function tmdb_page_url(result)
     if not result or not result.id then return nil end
@@ -315,12 +306,7 @@ local function tmdb_lookup(
         return nil
     end
     if type(cached) == 'table' and cached.negative then
-        if cached.cache_version ~= SHOW_CACHE_VERSION then
-            shared.poster_cache[key] = nil
-            shared.poster_cache_dirty = true
-            schedule_poster_cache_save()
-            cached = nil
-        elseif not persistent_entry_expired(cached) then
+        if cached.cache_version == SHOW_CACHE_VERSION then
             log_verbose('poster cache hit (no result)')
             return nil
         end
@@ -348,7 +334,7 @@ local function tmdb_lookup(
             return false
         end
 
-        local function score_primary(allow_early_stop)
+        local function score_primary()
             if #pool == 0 or cancelled() then return false end
             local outcome
             best, best_score, second_score, _, outcome =
@@ -357,15 +343,9 @@ local function tmdb_lookup(
                     scoring_context
                 )
             if outcome == 'cancelled' then return false end
-            if allow_early_stop then
-                confident = candidate_is_safe_early_stop(
-                    best, best_score, second_score, year
-                )
-            else
-                confident = candidate_is_confident(
-                    best, best_score, second_score
-                )
-            end
+            confident = candidate_is_safe_early_stop(
+                best, best_score, second_score, year
+            )
             return confident
         end
 
@@ -403,7 +383,7 @@ local function tmdb_lookup(
                     candidate.title, search_year, candidate.source .. suffix
                 )
                 if outcome == 'cancelled' then return outcome end
-                if score_primary(true) then return 'confident' end
+                if score_primary() then return 'confident' end
             end
             return 'ok'
         end
@@ -415,7 +395,7 @@ local function tmdb_lookup(
                     candidate.title, candidate.source
                 )
                 if outcome == 'cancelled' then return outcome end
-                if score_primary(true) then return 'confident' end
+                if score_primary() then return 'confident' end
             end
             return 'ok'
         end
@@ -462,7 +442,7 @@ local function tmdb_lookup(
                 if indexed_title_match then
                     tmdb_add_candidates(pool, seen, verified, preferred_type, 'local-export')
                     any_request_ok = true
-                    score_primary(true)
+                    score_primary()
                 end
             end
         end

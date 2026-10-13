@@ -27,6 +27,14 @@ local TMDB_NEGATIVE_CACHE_TTL = 7 * 24 * 60 * 60
 -- Persistent TTLs use wall-clock timestamps so they survive mpv restarts.
 -- v5.x stored some negative-cache expiries using mp.get_time(), which is
 -- process-relative and therefore cannot be trusted after a restart.
+local function unpack_cache_entry(cached)
+    if type(cached) == 'string' and #cached > 0 then return {poster = cached} end
+    if type(cached) == 'table' and cached.poster and #cached.poster > 0 then
+        return cached
+    end
+    return nil
+end
+
 local function persistent_entry_expired(entry)
     if type(entry) ~= 'table' then return false end
     if entry.expires_at then
@@ -184,6 +192,7 @@ end
 
 return {
     TMDB_NEGATIVE_CACHE_TTL = TMDB_NEGATIVE_CACHE_TTL,
+    unpack_cache_entry = unpack_cache_entry,
     load_poster_cache = load_poster_cache,
     persistent_entry_expired = persistent_entry_expired,
     remember_poster = remember_poster,

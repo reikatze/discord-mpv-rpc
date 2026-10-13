@@ -1,6 +1,7 @@
 -- TMDb episode retrieval, persistent episode caching, and display formatting.
 return function(modules, shared)
 local persistent_entry_expired = modules.cache.persistent_entry_expired
+local unpack_cache_entry = modules.cache.unpack_cache_entry
 local remember_poster = modules.cache.remember_poster
 local schedule_poster_cache_save = modules.cache.schedule_poster_cache_save
 local TMDB_EPISODE_LOOKUP = modules.config.TMDB_EPISODE_LOOKUP
@@ -10,21 +11,12 @@ local TMDB_POSITIVE_CACHE_TTL = modules.config.TMDB_POSITIVE_CACHE_TTL
 local format = modules.helpers.format
 local log_info = modules.helpers.log_info
 local log_verbose = modules.helpers.log_verbose
-local log_warn = modules.helpers.log_warn
 local time = modules.helpers.time
 local url_encode = modules.http.url_encode
 local tmdb_get_json_cached = modules.tmdb_requests.tmdb_get_json_cached
 local tmdb_lookup_cancelled = modules.tmdb_requests.tmdb_lookup_cancelled
 
 local TMDB_EPISODE_NEGATIVE_CACHE_TTL = 24 * 60 * 60
-
-local function unpack_cache_entry(cached)
-    if type(cached) == 'string' and #cached > 0 then return {poster = cached} end
-    if type(cached) == 'table' and cached.poster and #cached.poster > 0 then
-        return cached
-    end
-    return nil
-end
 
 local function request_episode(show_id, season, episode, lookup_token)
     if not show_id or not season or not episode then return nil end
@@ -123,14 +115,8 @@ local function apply_episode(hit, season, episode, lookup_token)
         cached = nil
     end
     if type(cached) == 'table' and cached.negative then
-        if not persistent_entry_expired(cached) then
-            log_verbose('episode poster cache hit (no result)')
-            return hit
-        end
-        shared.poster_cache[key] = nil
-        shared.poster_cache_dirty = true
-        schedule_poster_cache_save()
-        cached = nil
+        log_verbose('episode poster cache hit (no result)')
+        return hit
     end
 
     local episode_hit = unpack_cache_entry(cached)
@@ -152,10 +138,7 @@ local function apply_episode(hit, season, episode, lookup_token)
             hit.id, season, episode, lookup_token)
         if outcome == 'cancelled' or tmdb_lookup_cancelled(lookup_token) then return nil end
 
-        local got_season = tonumber(data and data.season_number)
-        local got_episode = tonumber(data and data.episode_number)
-        if data and got_season == tonumber(season)
-            and got_episode == tonumber(episode) then
+        if data then
             local resolved = {
                 poster = hit.poster,
                 title = hit.title,
@@ -175,10 +158,6 @@ local function apply_episode(hit, season, episode, lookup_token)
             hit = resolved
             remember_poster(key, hit)
             if hit.episode then log_info('episode -> ' .. hit.episode) end
-        elseif data then
-            log_warn(format(
-                'TMDb episode response mismatch: requested S%02dE%02d, got S%02dE%02d',
-                season, episode, got_season or -1, got_episode or -1))
         elseif outcome == 'not_found' then
             remember_poster(key, {
                 negative = true,

@@ -121,9 +121,6 @@ return function(modules, shared)
         manifest=nil;next_read=0
         launch()
     end
-    local function less(a, b)
-        return a < b
-    end
     local function candidates_many(titles, is_tv)
         local loaded, meta = pcall(load_manifest)
         if not loaded or not meta then reset_candidate_cache();return {} end
@@ -184,7 +181,7 @@ return function(modules, shared)
                             end
                         end
                         break
-                    elseif less(row[1], key) then low = mid + 1
+                    elseif row[1] < key then low = mid + 1
                     else high = mid - 1 end
                 end
                 add(matched)

@@ -90,15 +90,23 @@ check(index.candidates('Show',false)[1]==2,'generation change invalidates index 
 loadfile,io.open=real_loadfile,real_open
 
 local poster_shared={poster_cache={}}
-local season_requests, episode_requests=0,0
+local season_requests, episode_requests, wrong_identity=0,0,false
 local episode = assert(loadfile(root..'/modules/tmdb_episode.lua'))()({
     config={TMDB_EPISODE_LOOKUP=true,TMDB_KEY='key',TMDB_LANG='en-US',TMDB_POSITIVE_CACHE_TTL=60*86400},
-    cache={persistent_entry_expired=function(entry) return entry.expires_at and entry.expires_at<=clock end,
+    cache={unpack_cache_entry=assert(loadfile(root..'/modules/cache.lua'))()({
+        config={PATH_SEP='/'},helpers={SCRIPT_DIR=root},
+    },{}).unpack_cache_entry,persistent_entry_expired=function(entry) return entry.expires_at and entry.expires_at<=clock end,
         remember_poster=function(key,value) poster_shared.poster_cache[key]=value end,schedule_poster_cache_save=noop},
     helpers={format=string.format,time=function() return clock end,log_info=noop,log_verbose=noop,log_warn=noop},
     http={url_encode=function(s) return s end},
     tmdb_requests={tmdb_lookup_cancelled=function() return false end,tmdb_get_json_cached=function(url)
-        if url:find('/episode/',1,true) then episode_requests=episode_requests+1;return nil,'not_found' end
+        if url:find('/episode/',1,true) then
+            episode_requests=episode_requests+1
+            if wrong_identity then
+                return {season_number=2,episode_number=3,name='Wrong episode'},'ok'
+            end
+            return nil,'not_found'
+        end
         season_requests=season_requests+1
         return {season_number=1,episodes={
             {id=1,season_number=1,episode_number=1,name='First',still_path='/first.jpg'},
@@ -117,8 +125,14 @@ episode.apply_episode(base,1,3,1)
 check(episode_requests==1,'missing season record falls back to individual endpoint')
 clock=clock+86401;episode.apply_episode(base,1,1,1)
 check(season_requests==2,'expired season metadata refreshes')
+wrong_identity=true
+poster_shared.poster_cache[episode.persistent_key(10,1,3)]=nil
+local mismatch=episode.apply_episode(base,1,3,1)
+check(mismatch==base,'mismatched episode keeps the original show metadata')
+check(poster_shared.poster_cache[episode.persistent_key(10,1,3)]==nil,
+    'mismatched episode is not cached as a hit or a miss')
 
--- A fragmented READY response is consumed by timer callbacks, never recv_raw.
+-- A fragmented READY response is consumed by timer callbacks without blocking.
 local reply, chunk, writes, closes, ready_count = nil, '', {}, 0, 0
 local send_mode='again'
 local ipc = assert(loadfile(root..'/modules/ipc.lua'))()({
@@ -128,7 +142,6 @@ local ipc = assert(loadfile(root..'/modules/ipc.lua'))()({
     ipc_transport={install=function(rpc)
         rpc.connect=function(self) self.socket=true;return true end
         rpc.close=function(self) self.socket=nil;closes=closes+1 end
-        rpc.recv_raw=function() error('blocking receive called') end
         rpc.read_available=function() local result=chunk;chunk='';return result end
         rpc.send_some=function(_,data,offset)
             if send_mode=='again' then return nil,'again' end
@@ -214,6 +227,29 @@ reconnect.fn()
 check(connects==1 and timers[#timers].delay==16,'failed retry schedules the new deadline')
 keys['discord-mpv-rpc-toggle']()
 check(aborts==1 and presence_shared.tmdb_lookup_generation==1,'disabling invalidates and aborts metadata requests')
+
+-- No usable transport should disable presence without dereferencing nil IPC.
+local main_chunk=assert(loadfile(root..'/main.lua'))
+local captured_state, presence_loaded
+mp.get_script_directory=function() return root end
+loadfile=function(path)
+    local name=assert(path:match('/modules/(.+)%.lua$'))
+    return function()
+        return function(_,state)
+            captured_state=state
+            if name=='config' then state.enabled=true end
+            if name=='ipc_transport' or name=='ipc' then return nil end
+            if name=='presence' then presence_loaded=true end
+            return {}
+        end
+    end
+end
+local supported, startup_error=pcall(main_chunk)
+loadfile=real_loadfile
+check(supported,'missing IPC transport does not crash startup: '..tostring(startup_error))
+check(captured_state.enabled==false and not presence_loaded,
+    'missing IPC transport disables presence and skips its event handlers')
+check(type(captured_state.tick)=='function','disabled runtime provides a safe metadata tick')
 
 mp=saved_mp
 return passed
