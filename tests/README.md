@@ -45,4 +45,8 @@ included in this matrix.
 
 Linux and Windows build only a temporary mpv test runtime. macOS uses the
 Homebrew package; the tests fail if that runtime is not LuaJIT-enabled.
-Native job failures are reported in the corresponding Actions job log.
+The temporary builds explicitly disable OpenGL because the suites use null
+video and audio outputs. The runners resolve script paths against mpv's
+working directory, including the relative paths used by GitHub Actions.
+Failed cases include the child mpv log in the Actions output, even when the
+child times out. Individual logs are also written under `MPV_TEST_WORK`.

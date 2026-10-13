@@ -3,6 +3,8 @@ local suite_ok,suite_error=xpcall(function()
 local utils=require 'mp.utils'
 local ffi=require 'ffi'
 local script_dir=mp.get_script_directory() or assert(debug.getinfo(1,'S').source:match('^@(.+)[/\\][^/\\]+$'))
+script_dir=utils.join_path(utils.getcwd(),script_dir)
+local work=assert(os.getenv('MPV_TEST_WORK'),'MPV_TEST_WORK is required')
 local executable=assert(os.getenv('MPV_BIN'),'MPV_BIN is required')
 local expected=assert(os.getenv('MPV_RPC_TEST_PLATFORM'),'MPV_RPC_TEST_PLATFORM is required')
 assert(ffi.os==expected,'unexpected native test platform')
@@ -11,8 +13,13 @@ local modes={'success','rejection','disconnect','reconnect','handshake-timeout',
 local mode,index,handle,timer,deadline,connected,connections
 local rx,tx,fragment,rejected,pong='',{},nil,false,false
 local finished=false
+local child_log
 local function fail(reason)
     if finished then return end
+    if child_log then
+        local log=io.open(child_log,'rb')
+        if log then reason=tostring(reason)..'\nChild mpv log:\n'..log:read('*a');log:close() end
+    end
     finished=true
     if timer then timer:kill() end
     mp.msg.error('MPV_TEST_FAILURE native IPC runner: '..tostring(reason))
@@ -96,12 +103,14 @@ local function next_case()
         server.close();mp.msg.info('MPV_TEST_NATIVE_SUITE_OK '..expected);mp.commandv('quit',0);return
     end
     mode=modes[index];connections=0;connected=false;rx='';tx={};fragment=nil;rejected=false;pong=false
+    child_log=work..'/native-'..mode..'.log'
     deadline=mp.get_time()+15
     timer=mp.add_periodic_timer(0.02,function()
         local ok,err=xpcall(poll,debug.traceback);if not ok then fail(err) end
     end)
     handle=mp.command_native_async({name='subprocess',playback_only=false,capture_stdout=true,capture_stderr=true,
         args={executable,'--no-config','--load-scripts=no','--idle=yes','--vo=null','--ao=null','--terminal=yes',
+            '--log-file='..child_log,
             '--script='..script_dir..'/platform_ipc_probe.lua','--script-opts=mpv-native-ipc-mode='..mode}},function(success,result)
         if finished then return end
         handle=nil;timer:kill();server.disconnect();connected=false

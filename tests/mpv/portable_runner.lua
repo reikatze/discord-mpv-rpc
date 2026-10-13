@@ -3,6 +3,7 @@ local suite_ok,suite_error=xpcall(function()
 -- Runs the same real mpv lifecycle cases on Linux, macOS, and Windows.
 local utils=require 'mp.utils'
 local script_dir=mp.get_script_directory() or assert(debug.getinfo(1,'S').source:match('^@(.+)[/\\][^/\\]+$'))
+script_dir=utils.join_path(utils.getcwd(),script_dir)
 local root=script_dir:gsub('[/\\]tests[/\\]mpv$','')
 local executable=assert(os.getenv('MPV_BIN'))
 local media=assert(os.getenv('MPV_TEST_MEDIA'))
@@ -10,6 +11,7 @@ local work=assert(os.getenv('MPV_TEST_WORK'))
 local ffmpeg=assert(os.getenv('FFMPEG_BIN'))
 local sep='/'
 local server_handle,child_handle,case_timer
+local child_log
 local completed=false
 local function cleanup()
     if server_handle then mp.abort_async_command(server_handle);server_handle=nil end
@@ -17,6 +19,10 @@ local function cleanup()
 end
 local function fail(reason)
     if completed then return end
+    if child_log then
+        local log=io.open(child_log,'rb')
+        if log then reason=tostring(reason)..'\nChild mpv log:\n'..log:read('*a');log:close() end
+    end
     completed=true;cleanup();mp.msg.error('MPV_TEST_FAILURE portable runner: '..tostring(reason));mp.commandv('quit',1)
 end
 local function copy(path)
@@ -54,7 +60,9 @@ local function next_case()
         completed=true;mp.msg.info('MPV_TEST_PORTABLE_SUITE_OK 8 cases');mp.commandv('quit',0);return
     end
     local test=cases[index]
+    child_log=work..'/portable-'..index..'.log'
     local args={executable,'--no-config','--load-scripts=no','--vo=null','--ao=null','--terminal=yes','--msg-color=no','--msg-level=main=v'}
+    args[#args+1]='--log-file='..child_log
     if test.main then for _,arg in ipairs(main) do args[#args+1]=arg end end
     for _,arg in ipairs(test.args) do args[#args+1]=arg end
     local function launch()

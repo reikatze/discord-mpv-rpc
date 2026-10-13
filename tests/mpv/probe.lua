@@ -1,5 +1,6 @@
 local msg = require 'mp.msg'
 local options = require 'mp.options'
+local utils = require 'mp.utils'
 
 local o = {
     mode = 'idle',
@@ -11,7 +12,7 @@ local o = {
 }
 options.read_options(o, 'mpv-rpc-test')
 
-local source = debug.getinfo(1, 'S').source
+local source = '@' .. utils.join_path(utils.getcwd(), debug.getinfo(1, 'S').source:sub(2))
 local root = assert(source:match('^@(.+)[/\\]tests[/\\]mpv[/\\][^/\\]+$'))
 local failed = false
 local saw_file_loaded = false

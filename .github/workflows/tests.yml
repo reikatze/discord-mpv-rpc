@@ -90,7 +90,7 @@ jobs:
           test "$(git -C "$runtime_source" rev-parse HEAD)" = "$MPV_TEST_COMMIT"
           meson setup "$runtime_source/build" "$runtime_source" \
             --buildtype=release --wrap-mode=nofallback \
-            -Dauto_features=disabled -Dlua=luajit -Dlibmpv=false -Dtests=false
+            -Dauto_features=disabled -Dgl=disabled -Dlua=luajit -Dlibmpv=false -Dtests=false
           meson compile -C "$runtime_source/build" -j 2
           printf 'MPV_BIN=%s\n' "$runtime_source/build/mpv" >> "$GITHUB_ENV"
           printf 'FFMPEG_BIN=%s\n' "$(command -v ffmpeg)" >> "$GITHUB_ENV"
@@ -130,7 +130,7 @@ jobs:
           test "$(git -C "$runtime_source" rev-parse HEAD)" = "$MPV_TEST_COMMIT"
           meson setup "$runtime_source/build" "$runtime_source" \
             --buildtype=release --wrap-mode=nofallback \
-            -Dauto_features=disabled -Dlua=luajit -Dlibmpv=false -Dtests=false
+            -Dauto_features=disabled -Dgl=disabled -Dlua=luajit -Dlibmpv=false -Dtests=false
           meson compile -C "$runtime_source/build" -j 2
           printf 'MPV_BIN=%s\n' "$(cygpath -m "$runtime_source/build/mpv.exe")" >> "$GITHUB_ENV"
           printf 'FFMPEG_BIN=%s\n' "$(cygpath -m /ucrt64/bin/ffmpeg.exe)" >> "$GITHUB_ENV"
